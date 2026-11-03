@@ -11,3 +11,6 @@ docs/
 *.md
 .venv
 venv
+
+# Intentionally vulnerable demo code: never ship it in the production image
+demo/

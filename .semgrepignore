@@ -7,3 +7,7 @@ build/
 venv/
 .venv/
 __pycache__/
+
+# Intentionally vulnerable demo code. Excluded so this repo's own PR checks stay clean.
+demo/samples/
+demo/sample_pr/

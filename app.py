@@ -52,7 +52,7 @@ BOOT_TS = time.time()
 # ---------------- Config ----------------
 GITHUB_API = os.getenv("GITHUB_API", "https://api.github.com").rstrip("/")
 
-# Webhook secrets (optional; supports rotation). Default: permissive.
+# Webhook secrets (supports rotation). Required unless ALLOW_UNVERIFIED_WEBHOOKS=1.
 WEBHOOK_SECRET = (os.getenv("GITHUB_WEBHOOK_SECRET") or "").strip()
 SECRETS = [s.strip() for s in (os.getenv("GITHUB_WEBHOOK_SECRETS") or WEBHOOK_SECRET).split(",") if s.strip()]
 ALLOW_UNVERIFIED = os.getenv("ALLOW_UNVERIFIED_WEBHOOKS", "0") == "1"  # default: verify signatures
@@ -426,8 +426,13 @@ async def webhook(
                 x_github_delivery, provided256[-6:] if provided256 else "-", provided1[-6:] if provided1 else "-",
                 [e[-6:] for e in exp256], [e[-6:] for e in exp1]
             )
-    if SECRETS and not match and not ALLOW_UNVERIFIED:
-        return {"ok": False, "error": "Invalid signature", "delivery": x_github_delivery}
+    if not ALLOW_UNVERIFIED:
+        # No secret configured means nothing can be verified, so refuse rather than trust the request.
+        if not SECRETS:
+            log.error("rejecting delivery=%s: no webhook secret configured", x_github_delivery)
+            return {"ok": False, "error": "Webhook secret not configured", "delivery": x_github_delivery}
+        if not match:
+            return {"ok": False, "error": "Invalid signature", "delivery": x_github_delivery}
 
     # Parse payload
     try:

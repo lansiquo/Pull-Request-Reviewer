@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Local playground (`make playground`) with OWASP Top 10 samples. The samples are intentionally vulnerable.
+- Offline end-to-end demo (`make demo`) using a fake GitHub API.
+- Tests for webhook signature handling.
+
+### Fixed
+- `rules/security.yaml` failed to load because several patterns weren't quoted.
+- Leftover merge conflict in the `Makefile`.
+
+### Security
+- Webhooks are rejected when no secret is configured, unless `ALLOW_UNVERIFIED_WEBHOOKS=1`.
 
 ## [v0.1.0] - 2025-09-21
 ### Added

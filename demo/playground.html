@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR Reviewer Playground</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #d9dde3; --text: #1b1f24; --muted: #5b6470;
+    --accent: #4f46e5; --fail: #c62828; --fail-bg: #fdecec; --warn: #9a6700; --warn-bg: #fff6dc;
+    --ok: #1a7f37; --ok-bg: #e7f6ec; --code-bg: #fbfbfc; --added: #eefaf1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216; --panel: #161a20; --line: #2a313a; --text: #e6e9ee; --muted: #97a1ad;
+      --accent: #8b85ff; --fail: #ff7b72; --fail-bg: #3a1d1d; --warn: #e3b341; --warn-bg: #352a10;
+      --ok: #56d364; --ok-bg: #12301b; --code-bg: #12161b; --added: #142219;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .warn-banner { background: var(--warn-bg); color: var(--warn); border-bottom: 1px solid var(--line);
+                 padding: 10px 20px; font-size: 14px; }
+  header { padding: 20px 20px 8px; max-width: 1280px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); }
+  main { max-width: 1280px; margin: 0 auto; padding: 12px 20px 40px;
+         display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px 40px; } }
+  section { min-width: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .panel h2 { margin: 0; padding: 12px 14px; font-size: 14px; border-bottom: 1px solid var(--line); }
+  .samples button { display: block; width: 100%; text-align: left; background: none; border: 0;
+                    border-bottom: 1px solid var(--line); padding: 10px 14px; color: var(--text);
+                    font: inherit; cursor: pointer; }
+  .samples button:hover { background: var(--code-bg); }
+  .samples button.active { background: var(--code-bg); box-shadow: inset 3px 0 0 var(--accent); }
+  .samples .code { font-weight: 700; margin-right: 6px; }
+  .samples .exp { float: right; font-size: 12px; color: var(--muted); }
+  .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 14px;
+             border-bottom: 1px solid var(--line); }
+  .toolbar .note { color: var(--muted); font-size: 14px; flex: 1 1 260px; }
+  label.toggle { display: flex; gap: 6px; align-items: center; font-size: 14px; cursor: pointer; }
+  button.scan { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+                padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.scan:disabled { opacity: .6; cursor: wait; }
+  textarea { display: block; width: 100%; min-height: 280px; border: 0; resize: vertical; padding: 14px;
+             background: var(--code-bg); color: var(--text);
+             font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .result { margin-top: 16px; }
+  .verdict { padding: 12px 14px; font-weight: 700; border-bottom: 1px solid var(--line); }
+  .verdict.failure { color: var(--fail); } .verdict.success { color: var(--ok); }
+  .verdict small { font-weight: 400; color: var(--muted); margin-left: 8px; }
+  .diff { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  td.n { color: var(--muted); text-align: right; padding: 1px 10px; width: 1%; user-select: none; }
+  td.c { white-space: pre; padding: 1px 10px; background: var(--added); }
+  tr.failure td.c { background: var(--fail-bg); } tr.warning td.c { background: var(--warn-bg); }
+  td.ann { padding: 6px 12px; font-family: -apple-system, "Segoe UI", sans-serif; font-size: 13px; }
+  td.ann.failure { color: var(--fail); border-left: 3px solid var(--fail); background: var(--fail-bg); }
+  td.ann.warning { color: var(--warn); border-left: 3px solid var(--warn); background: var(--warn-bg); }
+  td.ann .more { color: var(--muted); }
+  .empty { padding: 14px; color: var(--muted); }
+  .err { padding: 14px; color: var(--fail); }
+  kbd { font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div class="warn-banner"><strong>Intentionally vulnerable samples.</strong> The code here is deliberately insecure, for learning only. It is scanned, never run. Keep this playground on localhost.</div>
+<header>
+  <h1>PR Reviewer Playground</h1>
+  <p>Pick an OWASP Top 10 sample or paste your own Python, then scan it with the same rules the GitHub check uses.</p>
+</header>
+<main>
+  <nav class="panel samples" aria-label="Samples">
+    <h2>OWASP Top 10 (2021) samples</h2>
+    <div id="list"></div>
+    <button id="own"><span class="code">✎</span>Write your own</button>
+  </nav>
+  <section>
+    <div class="panel">
+      <div class="toolbar">
+        <span class="note" id="note">Loading samples…</span>
+        <label class="toggle"><input type="checkbox" id="extended"> Extended rules</label>
+        <button class="scan" id="scan">Scan <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
+      </div>
+      <textarea id="code" spellcheck="false" aria-label="Code to scan"></textarea>
+    </div>
+    <div class="panel result" id="result" hidden></div>
+  </section>
+</main>
+<script>
+const EXPECT = { caught: "caught", partial: "partly caught", extended: "extended rules", missed: "missed" };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let samples = [];
+
+function select(i) {
+  document.querySelectorAll(".samples button").forEach((b) => b.classList.remove("active"));
+  if (i === null) {
+    $("own").classList.add("active");
+    $("code").value = "# Paste Python here and press Scan\nimport subprocess\n\nsubprocess.run(user_input, shell=True)\n";
+    $("note").textContent = "Your own code. Nothing is saved.";
+  } else {
+    const s = samples[i];
+    document.querySelector(`[data-i="${i}"]`).classList.add("active");
+    $("code").value = s.source;
+    $("note").textContent = `${s.code} ${s.title}: ${s.note}`;
+  }
+  $("result").hidden = true;
+}
+
+async function scan() {
+  const btn = $("scan"); btn.disabled = true; btn.firstChild.textContent = "Scanning… ";
+  const code = $("code").value;
+  try {
+    const r = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, extended: $("extended").checked }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    render(code, d);
+  } catch (e) {
+    $("result").hidden = false;
+    $("result").innerHTML = `<div class="err">Scan failed: ${esc(String(e.message || e))}</div>`;
+  } finally { btn.disabled = false; btn.firstChild.textContent = "Scan "; }
+}
+
+function render(code, d) {
+  const byLine = Object.fromEntries(d.findings.map((f) => [f.line, f]));
+  const fails = d.findings.filter((f) => f.level === "failure").length;
+  const warns = d.findings.filter((f) => f.level === "warning").length;
+  const verdict = d.conclusion === "failure"
+    ? `✖ Check failed: this PR would be blocked<small>${fails} blocking, ${warns} warning</small>`
+    : `✔ Check passed${warns ? `<small>${warns} warning (not blocking)</small>` : "<small>no findings</small>"}`;
+  let rows = "";
+  code.split("\n").forEach((line, idx) => {
+    const n = idx + 1, f = byLine[n];
+    rows += `<tr class="${f ? f.level : ""}"><td class="n">${n}</td><td class="c">+ ${esc(line)}</td></tr>`;
+    if (f) {
+      const extra = f.messages.length > 1 ? ` <span class="more">(${f.messages.length} rules agree)</span>` : "";
+      rows += `<tr><td></td><td class="ann ${f.level}">${f.level === "failure" ? "✖" : "⚠"} ${esc(f.messages[0])}${extra}</td></tr>`;
+    }
+  });
+  $("result").hidden = false;
+  $("result").innerHTML = `<div class="verdict ${d.conclusion}">${verdict}</div>` +
+    (d.findings.length ? "" : `<div class="empty">No rule matched. If this sample is vulnerable, that's a gap pattern rules can't see.</div>`) +
+    `<div class="diff"><table>${rows}</table></div>`;
+}
+
+fetch("/api/samples").then((r) => r.json()).then((list) => {
+  samples = list;
+  $("list").innerHTML = list.map((s, i) =>
+    `<button data-i="${i}"><span class="exp">${EXPECT[s.expect]}</span><span class="code">${s.code}</span>${esc(s.title)}</button>`).join("");
+  document.querySelectorAll("[data-i]").forEach((b) => b.onclick = () => select(+b.dataset.i));
+  select(0);
+});
+$("own").onclick = () => select(null);
+$("scan").onclick = scan;
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) scan(); });
+</script>
+</body>
+</html>
