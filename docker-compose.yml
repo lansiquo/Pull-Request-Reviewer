@@ -1,0 +1,10 @@
+services:
+  prsec:
+    build: .
+    image: pr-security-reviewer:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"   # bind to loopback; put a TLS reverse proxy in front
+    volumes:
+      - ./secrets:/app/secrets:ro   # place github-app.pem here

@@ -55,7 +55,7 @@ GITHUB_API = os.getenv("GITHUB_API", "https://api.github.com").rstrip("/")
 # Webhook secrets (optional; supports rotation). Default: permissive.
 WEBHOOK_SECRET = (os.getenv("GITHUB_WEBHOOK_SECRET") or "").strip()
 SECRETS = [s.strip() for s in (os.getenv("GITHUB_WEBHOOK_SECRETS") or WEBHOOK_SECRET).split(",") if s.strip()]
-ALLOW_UNVERIFIED = os.getenv("ALLOW_UNVERIFIED_WEBHOOKS", "1") == "1"  # default permissive
+ALLOW_UNVERIFIED = os.getenv("ALLOW_UNVERIFIED_WEBHOOKS", "0") == "1"  # default: verify signatures
 
 # GitHub App creds
 APP_ID = (os.getenv("GITHUB_APP_ID") or "").strip()
@@ -82,7 +82,7 @@ MAX_ANNOTS      = int(os.getenv("PRSEC_MAX_ANNOTATIONS", "200"))
 PRSEC_FORCE_OFFLINE = os.getenv("PRSEC_FORCE_OFFLINE", "1") == "1"
 ALWAYS_INCLUDE_PATTERNS = [
     s.strip()
-    for s in (os.getenv("PRSEC_ALWAYS_INCLUDE_PATTERNS", "bad.py,bad2.py,*bad*.py")).split(",")
+    for s in (os.getenv("PRSEC_ALWAYS_INCLUDE_PATTERNS", "")).split(",")
     if s.strip()
 ]
 
