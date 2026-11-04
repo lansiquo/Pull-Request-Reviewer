@@ -37,7 +37,6 @@ def test_webhook_smoke(monkeypatch):
 
     # Avoid filesystem/network in the pipeline and watchdog sleeps
     monkeypatch.setattr(appmod, "run_semgrep_pipeline", lambda *a, **k: None, raising=True)
-    monkeypatch.setattr(appmod, "watchdog_timeout_check", lambda *a, **k: None, raising=True)
 
     client = TestClient(appmod.app)
 
@@ -48,11 +47,11 @@ def test_webhook_smoke(monkeypatch):
         "installation": {"id": 999},
         "pull_request": {
             "head": {
-                "sha": "head456",
+                "sha": "a" * 40,
                 "repo": {"name": "demo-repo", "owner": {"login": "octo"}},
             },
             "base": {
-                "sha": "base123",
+                "sha": "b" * 40,
                 "repo": {"name": "demo-repo", "owner": {"login": "octo"}},
             },
         },
@@ -72,6 +71,6 @@ def test_webhook_smoke(monkeypatch):
         "event": "pull_request",
         "action": "opened",
         "pr": 42,
-        "head": "head456",
-        "base": "base123",
+        "head": "a" * 40,
+        "base": "b" * 40,
     }

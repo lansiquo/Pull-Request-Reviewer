@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-"""
-FastAPI webhook that turns PR events into Semgrep scans.
-
-Design goals:
-- 200s always; problems reported back via GitHub Checks output.
-- Deterministic scanning with an embedded offline ruleset, plus repo .semgrep.yaml if present.
-- Guaranteed inclusion of bad.py, bad2.py, and any *bad*.py.
-- Safe tar extraction (no raw extractall) to avoid self-flagging.
-"""
+"""Authenticated GitHub PR webhooks with bounded, trusted-rule Semgrep scans."""
 
 import io
+import math
+from email.utils import parsedate_to_datetime
+import re
+import shutil
+import threading
 import json
 import logging
 import os
@@ -19,16 +16,17 @@ import hmac
 import tarfile
 import hashlib
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 import certifi
 import requests
-from fastapi import BackgroundTasks, FastAPI, Header, Request
+from fastapi import BackgroundTasks, FastAPI, Header, Request, HTTPException
 from dotenv import load_dotenv
 
 # Load local env for dev
-load_dotenv(dotenv_path=".env")
+if os.getenv("PRSEC_LOAD_DOTENV", "1") == "1":
+    load_dotenv(dotenv_path=".env")
 
 # Ensure we see everything unless caller overrides
 os.environ.setdefault("PRSEC_SEMGREP_MIN_SEVERITY", "LOW")
@@ -52,10 +50,19 @@ BOOT_TS = time.time()
 # ---------------- Config ----------------
 GITHUB_API = os.getenv("GITHUB_API", "https://api.github.com").rstrip("/")
 
-# Webhook secrets (optional; supports rotation). Default: permissive.
+# Required webhook secrets; comma-separated values support rotation.
 WEBHOOK_SECRET = (os.getenv("GITHUB_WEBHOOK_SECRET") or "").strip()
 SECRETS = [s.strip() for s in (os.getenv("GITHUB_WEBHOOK_SECRETS") or WEBHOOK_SECRET).split(",") if s.strip()]
-ALLOW_UNVERIFIED = os.getenv("ALLOW_UNVERIFIED_WEBHOOKS", "1") == "1"  # default permissive
+# Authentication cannot be disabled by a stale development environment.
+MAX_WEBHOOK_BYTES = 1024 * 1024
+MAX_ARCHIVE_BYTES = 25 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10000
+SCAN_SLOTS = threading.BoundedSemaphore(2)
+MODE = os.getenv("PRSEC_MODE", "local")
+ALLOWED_REPOSITORY = os.getenv("PRSEC_ALLOWED_REPOSITORY", "")
+ALLOWED_INSTALLATION_ID = int(os.getenv("PRSEC_ALLOWED_INSTALLATION_ID", "0"))
+JOB_DB = os.getenv("PRSEC_JOB_DB", "data/jobs.sqlite3")
 
 # GitHub App creds
 APP_ID = (os.getenv("GITHUB_APP_ID") or "").strip()
@@ -69,22 +76,11 @@ FORCE_EXPLICIT_TOKEN = os.getenv("FORCE_EXPLICIT_TOKEN") == "1"
 # Timeouts / limits
 HTTP_TIMEOUT_S      = int(os.getenv("HTTP_TIMEOUT_S", "25"))
 SEMGREP_TIMEOUT_S   = int(os.getenv("SEMGREP_TIMEOUT_S", "120"))
-PIPELINE_DEADLINE_S = int(os.getenv("PIPELINE_DEADLINE_S", "90"))
-WATCHDOG_GRACE_S    = int(os.getenv("WATCHDOG_GRACE_S", "20"))
 
 # Scan/reporting
-CHECK_NAME      = os.getenv("PRSEC_CHECK_NAME", "RobinSec")
-SEMGREP_CONFIG  = os.getenv("SEMGREP_CONFIG") or None
+CHECK_NAME      = os.getenv("PRSEC_CHECK_NAME", "PRSecurityScan")
 SEMGREP_EXCLUDE = [s for s in (os.getenv("SEMGREP_EXCLUDE") or "").split(",") if s]
 MAX_ANNOTS      = int(os.getenv("PRSEC_MAX_ANNOTATIONS", "200"))
-
-# Deterministic scanning defaults (no registry fetch)
-PRSEC_FORCE_OFFLINE = os.getenv("PRSEC_FORCE_OFFLINE", "1") == "1"
-ALWAYS_INCLUDE_PATTERNS = [
-    s.strip()
-    for s in (os.getenv("PRSEC_ALWAYS_INCLUDE_PATTERNS", "bad.py,bad2.py,*bad*.py")).split(",")
-    if s.strip()
-]
 
 # ---------- Helpers ----------
 def _hmac_sig(secret: str, body: bytes, algo: str) -> str:
@@ -118,6 +114,42 @@ def _create_app_jwt() -> str:
     token = jwt.encode(payload, _read_private_key(), algorithm="RS256")
     return token.decode() if isinstance(token, (bytes, bytearray)) else token
 
+class GitHubRateLimitError(requests.HTTPError):
+    """Safe error carrying a server-directed delay, never response text."""
+    def __init__(self, response, retry_after):
+        super().__init__('GitHub rate limit; retry deferred', response=response)
+        self.retry_after = retry_after
+
+
+def _raise_for_rate_limit(response):
+    if response.status_code not in (403, 429):
+        return
+    headers = response.headers
+    if response.status_code != 429 and not (response.status_code == 403 and
+            ('Retry-After' in headers or headers.get('X-RateLimit-Remaining') == '0')):
+        return
+    delays = [60.0]
+    if headers.get('Retry-After'):
+        value = headers['Retry-After']
+        try:
+            delay = float(value)
+        except ValueError:
+            try:
+                delay = parsedate_to_datetime(value).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                delay = 60.0
+        if math.isfinite(delay):
+            delays.append(max(0.0, delay))
+    if headers.get('X-RateLimit-Remaining') == '0':
+        try:
+            delay = float(headers['X-RateLimit-Reset']) - time.time()
+            if math.isfinite(delay):
+                delays.append(max(0.0, delay))
+        except (KeyError, ValueError):
+            pass
+    raise GitHubRateLimitError(response, max(delays))
+
+
 def _gh_request(method: str, url: str, token: str, install_id: Optional[int] = None, **kwargs) -> requests.Response:
     r = requests.request(method, url, headers=_bearer(token), timeout=HTTP_TIMEOUT_S, verify=_ca_bundle(), **kwargs)
     if r.status_code == 401 and install_id:
@@ -125,7 +157,12 @@ def _gh_request(method: str, url: str, token: str, install_id: Optional[int] = N
             fresh = _get_installation_token(int(install_id))
             r = requests.request(method, url, headers=_bearer(fresh), timeout=HTTP_TIMEOUT_S, verify=_ca_bundle(), **kwargs)
         except Exception as e:
-            log.error("401 retry failed: %s", e)
+            log.error("401 retry failed error_type=%s", type(e).__name__)
+            if isinstance(e, requests.RequestException):
+                # Preserve the refresh failure: a transient 5xx/connection error
+                # must reach worker retry policy instead of becoming the old 401.
+                raise
+    _raise_for_rate_limit(r)
     return r
 
 def _post_json(url: str, token: str, payload: dict, install_id: Optional[int] = None) -> dict:
@@ -135,7 +172,7 @@ def _post_json(url: str, token: str, payload: dict, install_id: Optional[int] = 
     except Exception:
         try_json = None
     if r.status_code >= 400:
-        log.error("POST %s -> %s %s body=%s resp=%s", url, r.status_code, r.reason, str(payload)[:400], (r.text or str(try_json))[:800])
+        log.error("GitHub POST failed status=%s", r.status_code)
     else:
         loc = (try_json or {}).get("html_url") or r.headers.get("Location")
         if loc:
@@ -150,24 +187,32 @@ def _patch_json(url: str, token: str, payload: dict, install_id: Optional[int] =
     except Exception:
         try_json = None
     if r.status_code >= 400:
-        log.error("PATCH %s -> %s %s body=%s resp=%s", url, r.status_code, r.reason, str(payload)[:400], (r.text or str(try_json))[:800])
+        log.error("GitHub PATCH failed status=%s", r.status_code)
     r.raise_for_status()
     return try_json or {}
 
 def _get_json(url: str, token: str, params: Optional[dict] = None, install_id: Optional[int] = None) -> dict:
     r = _gh_request("GET", url, token, install_id=install_id, params=params or {})
     if r.status_code >= 400:
-        log.error("GET %s -> %s %s: %s", url, r.status_code, r.reason, r.text[:800])
+        log.error("GitHub GET failed status=%s", r.status_code)
     r.raise_for_status()
     return r.json()
 
 def _get_installation_token(installation_id: int) -> str:
-    if installation_id and not FORCE_EXPLICIT_TOKEN:
+    if MODE == "durable" and (installation_id != ALLOWED_INSTALLATION_ID or not ALLOWED_REPOSITORY):
+        raise RuntimeError("Installation is outside configured scope")
+    if installation_id and (MODE == "durable" or not FORCE_EXPLICIT_TOKEN):
         app_jwt = _create_app_jwt()
         url = f"{GITHUB_API}/app/installations/{installation_id}/access_tokens"
-        r = requests.post(url, headers={"Authorization": f"Bearer {app_jwt}", "Accept": "application/vnd.github+json"}, timeout=HTTP_TIMEOUT_S, verify=_ca_bundle())
+        scope = {}
+        if ALLOWED_REPOSITORY:
+            scope = {"repositories": [ALLOWED_REPOSITORY.split("/")[1]],
+                     "permissions": {"contents": "read", "pull_requests": "read", "checks": "write"}}
+        r = requests.post(url, headers={"Authorization": f"Bearer {app_jwt}", "Accept": "application/vnd.github+json"},
+                          json=scope, timeout=HTTP_TIMEOUT_S, verify=_ca_bundle())
         if r.status_code >= 400:
-            log.error("POST %s -> %s %s: %s", url, r.status_code, r.reason, r.text[:800])
+            log.error("GitHub token request failed status=%s", r.status_code)
+        _raise_for_rate_limit(r)
         r.raise_for_status()
         return r.json()["token"]
     if EXPLICIT_INSTALLATION_TOKEN:
@@ -177,15 +222,40 @@ def _get_installation_token(installation_id: int) -> str:
 # ---------- Safe tar extraction (member-by-member) ----------
 def _safe_extract_tar(tf: tarfile.TarFile, dest_dir: Path) -> str:
     base = dest_dir.resolve()
-    members = tf.getmembers()
-    for m in members:
-        target = (base / m.name).resolve()
-        if not str(target).startswith(str(base)):
-            raise RuntimeError("Unsafe tar path detected")
-    tf.extractall(base)  # safe because we validated paths above
-    # Compute root directory from first member (GitHub tarballs have a single top-level dir)
-    root_name = Path(members[0].name).parts[0] if members else ""
+    total = 0
+    root_name = None
+    seen = set()
+    for index, member in enumerate(tf):
+        if index >= MAX_ARCHIVE_MEMBERS:
+            raise RuntimeError("Archive has too many members")
+        name = PurePosixPath(member.name)
+        if (name.is_absolute() or ".." in name.parts or not name.parts
+                or "\\" in member.name or not (member.isdir() or member.isreg())):
+            raise RuntimeError("Unsafe archive member")
+        if root_name is None:
+            root_name = name.parts[0]
+        if name.parts[0] != root_name or (len(name.parts) == 1 and not member.isdir()):
+            raise RuntimeError("Archive must have one root directory")
+        target = base.joinpath(*name.parts)
+        if not target.resolve().is_relative_to(base) or target in seen:
+            raise RuntimeError("Unsafe or duplicate archive path")
+        seen.add(target)
+        total += member.size
+        if member.size < 0 or total > MAX_EXTRACTED_BYTES:
+            raise RuntimeError("Archive exceeds extraction size limit")
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = tf.extractfile(member)
+            if source is None:
+                raise RuntimeError("Unreadable archive member")
+            with source, target.open("xb") as output:
+                shutil.copyfileobj(source, output)
+    if not root_name:
+        raise RuntimeError("Empty archive")
     return root_name
+
 
 # ---------- GitHub Checks helpers ----------
 def _create_check_in_progress(owner: str, repo: str, head_sha: str, name: str, title: str, summary: str, token: str, install_id: Optional[int]) -> int:
@@ -214,38 +284,42 @@ def complete_check_run(owner: str, repo: str, check_id: int, conclusion: str, ti
         batch, rest = rest[:50], rest[50:]
         _patch_json(url, token, {"output": {"title": title, "summary": summary, "annotations": batch}}, install_id=install_id)
 
-def watchdog_timeout_check(owner: str, repo: str, check_id: int, token: str, install_id: Optional[int], after_seconds: int) -> None:
-    try:
-        time.sleep(max(after_seconds, 1))
-        url = f"{GITHUB_API}/repos/{owner}/{repo}/check-runs/{check_id}"
-        jr = _get_json(url, token, install_id=install_id)
-        if (jr.get("status") == "in_progress") and (jr.get("conclusion") in (None, "action_required")):
-            log.warning("watchdog: completing stale check-run id=%s as timed_out", check_id)
-            _patch_json(url, token, {"status": "completed", "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "conclusion": "timed_out", "output": {"title": CHECK_NAME, "summary": "Timed out waiting for scan to complete."}}, install_id=install_id)
-    except Exception as e:
-        log.error("watchdog error: %s", e)
-
 # ---------- Repo utilities ----------
 def list_changed_files(owner: str, repo: str, pr: int, token: str, install_id: Optional[int]) -> List[str]:
     files: List[str] = []
     page = 1
-    while True:
+    while page <= 30:
         js = _get_json(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr}/files", token, params={"per_page": 100, "page": page}, install_id=install_id)
+        if not isinstance(js, list) or any(not isinstance(x, dict) or not isinstance(x.get('filename'), str) for x in js):
+            raise RuntimeError('Invalid PR file list')
         if not js:
             break
-        files.extend([x["filename"] for x in js if isinstance(x.get("filename"), str)])
+        files.extend(x['filename'] for x in js if x.get('status') != 'removed')
         if len(js) < 100:
             break
         page += 1
+    else:
+        raise RuntimeError("PR file list exceeded supported pagination limit")
     return files
 
 def download_tarball(owner: str, repo: str, sha: str, token: str, install_id: Optional[int], workdir: Path) -> Path:
     url = f"{GITHUB_API}/repos/{owner}/{repo}/tarball/{sha}"
     r = _gh_request("GET", url, token, install_id=install_id, stream=True)
     if r.status_code >= 400:
-        log.error("GET %s -> %s %s: %s", url, r.status_code, r.reason, r.text[:800])
+        log.error("GitHub GET failed status=%s", r.status_code)
     r.raise_for_status()
-    tar_bytes = io.BytesIO(r.content)
+    tar_bytes = io.BytesIO()
+    started = time.monotonic()
+    try:
+        for chunk in r.iter_content(chunk_size=65536):
+            if time.monotonic() - started > 60:
+                raise RuntimeError("Archive download deadline exceeded")
+            if tar_bytes.tell() + len(chunk) > MAX_ARCHIVE_BYTES:
+                raise RuntimeError("Archive download exceeds size limit")
+            tar_bytes.write(chunk)
+    finally:
+        r.close()
+    tar_bytes.seek(0)
     with tarfile.open(fileobj=tar_bytes, mode="r:gz") as tf:
         root_name = _safe_extract_tar(tf, workdir)
     repo_root = workdir / (root_name or "")
@@ -270,11 +344,19 @@ def run_semgrep_pipeline(
     check_repo: str,
     check_id: int,
     token: str,
-) -> None:
+    expected_base_sha: Optional[str] = None,
+    expected_base_ref: Optional[str] = None,
+) -> Optional[dict]:
     conclusion = "failure"
     title = f"{CHECK_NAME} results"
     summary = "Scan failed."
     annotations: List[Dict[str, Any]] = []
+    scan_error = None
+
+    def _stale(current):
+        return (current.get('state') == 'closed' or current.get('head', {}).get('sha') != head_sha
+                or (expected_base_sha is not None and current.get('base', {}).get('sha') != expected_base_sha)
+                or (expected_base_ref is not None and current.get('base', {}).get('ref') != expected_base_ref))
 
     def _safe_complete():
         try:
@@ -287,59 +369,49 @@ def run_semgrep_pipeline(
                 else:
                     raise
         except Exception as e:
-            log.error("final completion failed: %s", e)
+            log.error("final completion failed type=%s", type(e).__name__)
+            if MODE == "durable":
+                raise
 
+    defer_completion = False
     try:
         with tempfile.TemporaryDirectory(prefix="prsec_") as td:
             tdp = Path(td)
 
+            if MODE == "durable":
+                current = _get_json(f"{GITHUB_API}/repos/{base_owner}/{base_repo}/pulls/{pr}",
+                                    token, install_id=installation_id)
+                if _stale(current):
+                    conclusion = "cancelled"
+                    summary = "PR closed or superseded by a newer commit; this job was not scanned."
+                    return
             # 1) Download repo snapshot at PR HEAD
             repo_root = download_tarball(head_owner, head_repo, head_sha, token, installation_id, tdp)
 
-            # 2) Build target file list
-            try:
-                changed = list_changed_files(base_owner, base_repo, pr, token, installation_id)
-                log.info("PR changed files (from GitHub API): %s", changed[:50])
-            except Exception as e:
-                log.error("failed to list changed files: %s", e)
-                changed = []
-
-            paths = changed or [str(p.relative_to(repo_root)) for p in repo_root.rglob("*.py")]
-            existing = [p for p in paths if (repo_root / p).exists()]
-
-            # Force-include patterns (bad.py, bad2.py, *bad*.py by default)
-            for pat in ALWAYS_INCLUDE_PATTERNS:
-                for found in repo_root.rglob(pat):
-                    rel = str(found.relative_to(repo_root))
-                    if rel not in existing:
-                        existing.append(rel)
-
+            # Scan the immutable snapshot with service-owned rules only.
+            # Repository rules/ignore files are untrusted and never configure this scan.
+            changed = list_changed_files(base_owner, base_repo, pr, token, installation_id)
+            if MODE == "durable":
+                current = _get_json(f"{GITHUB_API}/repos/{base_owner}/{base_repo}/pulls/{pr}",
+                                    token, install_id=installation_id)
+                if _stale(current):
+                    conclusion = "cancelled"
+                    summary = "PR closed or changed during preparation; this job was not scanned."
+                    return
+            for name in changed:
+                candidate = repo_root / name
+                if Path(name).is_absolute() or not candidate.resolve().is_relative_to(repo_root.resolve()):
+                    raise RuntimeError("Unsafe changed-file path")
+            existing = [p for p in changed if p.endswith('.py')]
+            if any(not (repo_root / p).is_file() for p in existing):
+                raise RuntimeError('Changed Python file is missing from the commit snapshot')
             if not existing:
-                existing = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*.py")]
-
-            # 3) Choose Semgrep configs (prefer offline + repo .semgrep.yaml if present)
-            cfgs: List[str] = []
-            if PRSEC_FORCE_OFFLINE:
-                offline_yaml = tdp / ".semgrep.yaml"
-                offline_yaml.write_text(OFFLINE_RULESET)
-                cfgs.append(str(offline_yaml))
-
-            # add repo-config if present (lets you iterate locally)
-            for name in (".semgrep.yaml", ".semgrep.yml"):
-                cand = repo_root / name
-                if cand.exists():
-                    cfgs.append(str(cand))
-                    break
-
-            # extra config from env (can be registry id(s) or URL)
-            if SEMGREP_CONFIG:
-                cfgs.append(SEMGREP_CONFIG)
-
-            # last resort if offline disabled & nothing else
-            if not cfgs and not PRSEC_FORCE_OFFLINE:
-                cfgs.append("p/security-audit")
-
-            cfg_value = ",".join(cfgs)
+                conclusion = "neutral"
+                summary = "No supported changed Python files to scan (deleted files are excluded)."
+                return
+            offline_yaml = tdp / "trusted-rules.yaml"
+            offline_yaml.write_text(OFFLINE_RULESET)
+            cfg_value = str(offline_yaml)
 
             # beefier excludes
             ex = [e for e in SEMGREP_EXCLUDE] if SEMGREP_EXCLUDE else []
@@ -351,17 +423,19 @@ def run_semgrep_pipeline(
             log.info("Scan root=%s file_count=%d sample=%s", repo_root, len(existing), existing[:10])
 
             # 4) Run Semgrep
-            try:
-                findings = run_semgrep(
-                    paths=existing,
-                    repo_root=str(repo_root),
-                    config=cfg_value,          # comma-separated; runner expands to multiple --config flags
-                    exclude=ex,
-                    timeout_s=SEMGREP_TIMEOUT_S,
-                )
-            except Exception as e:
-                log.error("semgrep invocation failed: %s", e)
-                findings = []
+            findings = run_semgrep(
+                paths=existing, repo_root=str(repo_root), config=cfg_value,
+                exclude=ex, timeout_s=SEMGREP_TIMEOUT_S,
+            )
+
+            # A PR can close or advance while Semgrep is running.
+            if MODE == 'durable':
+                current = _get_json(f'{GITHUB_API}/repos/{base_owner}/{base_repo}/pulls/{pr}',
+                                    token, install_id=installation_id)
+                if _stale(current):
+                    conclusion = 'cancelled'
+                    summary = 'PR closed or changed during scanning; this result is stale.'
+                    return
 
             # 5) Summarize & annotate
             counts, summary_md = summarize_findings(findings)
@@ -377,26 +451,47 @@ def run_semgrep_pipeline(
             if summary_md:
                 summary = summary_md
 
+    except GitHubRateLimitError:
+        defer_completion = True
+        raise
     except Exception as e:
-        log.error("pipeline error: %s", e)
+        if MODE == 'durable' and isinstance(e, requests.RequestException):
+            defer_completion = True
+            raise
+        scan_error = type(e).__name__
+        log.error("pipeline error type=%s", scan_error)
+        summary = "Scan incomplete: scanner, archive, or GitHub API error. No clean result was issued."
     finally:
-        _safe_complete()
+        if not defer_completion:
+            _safe_complete()
+    return {'conclusion': conclusion, 'scan_error': scan_error}
+
+def _run_reserved_scan(*args):
+    try:
+        run_semgrep_pipeline(*args)
+    finally:
+        SCAN_SLOTS.release()
+
+
+from job_payload import pr_job, identifier as queue_identifier, sha as queue_sha, branch as queue_branch
 
 # ---------------- Startup / Health ----------------
-@app.on_event("startup")
-def _startup_log_routes() -> None:
-    try:
-        from starlette.routing import Route
-        for r in app.router.routes:
-            if isinstance(r, Route):
-                log.info("route registered: %s methods=%s", r.path, sorted(r.methods))
-        log.info("webhook secrets configured: %d", len(SECRETS))
-    except Exception:
-        pass
-
 @app.get("/health", include_in_schema=False)
 def health() -> Dict[str, Any]:
     return {"ok": True, "service": "prsec-webhook", "uptime_s": int(time.time() - BOOT_TS), "has_secret": bool(SECRETS)}
+
+@app.get("/ready", include_in_schema=False)
+def ready():
+    if MODE == "durable":
+        from job_store import JobStore
+        store = JobStore(JOB_DB)
+        if not SECRETS or not ALLOWED_REPOSITORY or not ALLOWED_INSTALLATION_ID or not store.ready():
+            raise HTTPException(503, "Worker unavailable or configuration incomplete")
+        status = store.status()
+        return {'ready': True, 'mode': MODE, 'degraded': status['needs_attention'],
+                'queue': status['counts'], 'cooldown_until': status['cooldown_until']}
+    return {"ready": True, "mode": MODE}
+
 
 # ---------------- Webhook ----------------
 @app.post("/webhook")
@@ -410,67 +505,99 @@ async def webhook(
     x_github_hook_id: Optional[str] = Header(None, alias="X-GitHub-Hook-ID"),
     x_github_target: Optional[str] = Header(None, alias="X-GitHub-Hook-Installation-Target-Type"),
 ):
-    body: bytes = await request.body()
-
-    # Signature verification — never 401; report in JSON if strict.
-    provided256 = (x_hub_signature_256 or "").strip()
-    provided1   = (x_hub_signature or "").strip()
-    match = True
-    if SECRETS:
-        exp256 = [_hmac_sig(sec, body, "sha256") for sec in SECRETS]
-        exp1   = [_hmac_sig(sec, body, "sha1") for sec in SECRETS]
-        match = (provided256 and provided256 in exp256) or (provided1 and provided1 in exp1)
-        if not match:
-            log.warning(
-                "signature mismatch delivery=%s provided256=%s provided1=%s exp256_suffixes=%s exp1_suffixes=%s",
-                x_github_delivery, provided256[-6:] if provided256 else "-", provided1[-6:] if provided1 else "-",
-                [e[-6:] for e in exp256], [e[-6:] for e in exp1]
-            )
-    if SECRETS and not match and not ALLOW_UNVERIFIED:
-        return {"ok": False, "error": "Invalid signature", "delivery": x_github_delivery}
-
-    # Parse payload
+    if not SECRETS:
+        raise HTTPException(503, "Webhook secret is not configured")
+    if MODE == "durable" and (not ALLOWED_REPOSITORY or not ALLOWED_INSTALLATION_ID):
+        raise HTTPException(503, "Deployment repository scope is not configured")
+    body_buffer = bytearray()
+    async for chunk in request.stream():
+        if len(body_buffer) + len(chunk) > MAX_WEBHOOK_BYTES:
+            raise HTTPException(413, "Webhook payload too large")
+        body_buffer.extend(chunk)
+    body = bytes(body_buffer)
+    provided = x_hub_signature_256 or ""
+    if not any(hmac.compare_digest(provided, _hmac_sig(secret, body, "sha256")) for secret in SECRETS):
+        raise HTTPException(401, "Invalid signature")
     try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception:
-        return {"ok": False, "error": "Invalid JSON", "delivery": x_github_delivery}
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("Expected object")
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "Invalid JSON object")
 
     log.info("delivery=%s event=%s len=%d hook_id=%s target=%s", x_github_delivery, x_github_event, len(body), x_github_hook_id, x_github_target)
 
     if x_github_event == "ping":
         return {"ok": True, "pong": True}
 
+    if x_github_event == 'push' and MODE == 'durable':
+        try:
+            repo = payload['repository']
+            owner, name = queue_identifier(repo['owner']['login']), queue_identifier(repo['name'])
+            installation = int(payload['installation']['id'])
+            ref = payload['ref']
+            if not isinstance(ref, str) or type(payload.get('deleted', False)) is not bool:
+                raise ValueError('Malformed push')
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, 'Malformed push payload')
+        if f'{owner}/{name}' != ALLOWED_REPOSITORY or installation != ALLOWED_INSTALLATION_ID:
+            raise HTTPException(403, 'Push is outside configured scope')
+        if not ref.startswith('refs/heads/') or payload.get('deleted'):
+            return {'ok': True, 'ignored': 'non-branch or deleted ref'}
+        try:
+            job = {'kind': 'base_push', 'base_owner': owner, 'base_repo': name,
+                   'installation_id': installation, 'base_ref': queue_branch(ref[len('refs/heads/'):]),
+                   'after': queue_sha(payload['after'])}
+            if job['after'] == '0' * 40: raise ValueError('Invalid branch tip')
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, 'Malformed branch push')
+        from job_store import JobStore
+        try:
+            key, created = JobStore(JOB_DB).enqueue(job)
+        except OverflowError:
+            raise HTTPException(503, 'Queue full; redeliver later')
+        return {'ok': True, 'queued': created, 'job_id': key}
+
     if x_github_event == "pull_request":
         action = payload.get("action")
         if action not in {"opened", "reopened", "synchronize", "edited", "ready_for_review"}:
             return {"ok": True, "ignored": action}
         try:
-            base = payload["pull_request"]["base"]["repo"]
-            head = payload["pull_request"]["head"]["repo"]
-            base_owner, base_repo = base["owner"]["login"], base["name"]
-            head_owner, head_repo = head["owner"]["login"], head["name"]
-            pr_number = int(payload["number"])
-            head_sha  = payload["pull_request"]["head"]["sha"]
-            base_sha  = payload["pull_request"]["base"]["sha"]
-            installation_id = int(payload.get("installation", {}).get("id") or 0)
+            job = pr_job(payload['pull_request'], payload['number'], payload.get('installation', {}).get('id') or 0)
+            base_owner, base_repo = job['base_owner'], job['base_repo']
+            head_owner, head_repo = job['head_owner'], job['head_repo']
+            pr_number, head_sha, base_sha = job['pr'], job['head_sha'], job['base_sha']
+            installation_id = job['installation_id']
         except Exception as e:
-            log.error("payload parse error: %s", e)
-            return {"ok": False, "error": "Malformed PR payload", "delivery": x_github_delivery}
+            log.error("payload parse error error_type=%s", type(e).__name__)
+            raise HTTPException(400, "Malformed PR payload")
 
-        # Acquire token (non-fatal to HTTP status)
+        if ALLOWED_REPOSITORY and f"{base_owner}/{base_repo}" != ALLOWED_REPOSITORY:
+            raise HTTPException(403, "Repository is outside configured scope")
+        if ALLOWED_INSTALLATION_ID and installation_id != ALLOWED_INSTALLATION_ID:
+            raise HTTPException(403, "Installation is outside configured scope")
+        if MODE == "durable":
+            from job_store import JobStore
+            # Only identifiers enter the queue; no raw body, tokens or credentials.
+            if action == 'reopened':
+                # GitHub preserves delivery identity on redelivery; real reopen events
+                # get distinct identities even when the commit is unchanged.
+                job['reopen_event'] = hashlib.sha256(x_github_delivery.encode()).hexdigest()
+            try:
+                key, created = JobStore(JOB_DB).enqueue(job)
+            except OverflowError:
+                raise HTTPException(503, "Queue full; redeliver later")
+            return {"ok": True, "queued": created, "job_id": key, "head": head_sha}
+
+        if not SCAN_SLOTS.acquire(blocking=False):
+            raise HTTPException(503, "Scanner busy; retry delivery later")
+        # Acquire token
         try:
             token = _get_installation_token(installation_id)
         except Exception as e:
-            log.error("token acquisition failed: %s", e)
-            return {"ok": False, "error": "Token acquisition failed", "delivery": x_github_delivery}
-
-        # PR receipt comment (best-effort)
-        try:
-            _post_json(f"{GITHUB_API}/repos/{base_owner}/{base_repo}/issues/{pr_number}/comments",
-                       token, {"body": f"PRSec ✅ received `{action}` for `{head_sha[:7]}` (delivery `{x_github_delivery}`)"},
-                       install_id=installation_id)
-        except Exception as e:
-            log.error("failed to comment on PR: %s", e)
+            log.error("token acquisition failed error_type=%s", type(e).__name__)
+            SCAN_SLOTS.release()
+            raise HTTPException(502, "Token acquisition failed")
 
         # Create Check Run (fallback on perms)
         try:
@@ -479,20 +606,17 @@ async def webhook(
                 CHECK_NAME, f"{CHECK_NAME} results", "Scanning…", token, installation_id
             )
         except Exception as e:
-            log.error("failed to create check run: %s", e)
-            return {"ok": False, "error": "Check run creation failed", "delivery": x_github_delivery}
+            log.error("failed to create check run error_type=%s", type(e).__name__)
+            SCAN_SLOTS.release()
+            raise HTTPException(502, "Check run creation failed")
 
-        # Launch scanner + watchdog
+        # Launch the bounded background scanner
         background.add_task(
-            run_semgrep_pipeline,
+            _run_reserved_scan,
             base_owner, base_repo, head_owner, head_repo, pr_number, head_sha,
             installation_id, check_owner, check_repo, check_id, token,
         )
-        background.add_task(
-            watchdog_timeout_check,
-            check_owner, check_repo, check_id, token, installation_id,
-            (PIPELINE_DEADLINE_S or 0) + WATCHDOG_GRACE_S,
-        )
+
 
         return {"ok": True, "event": "pull_request", "action": action, "pr": pr_number, "head": head_sha, "base": base_sha}
 
@@ -500,164 +624,4 @@ async def webhook(
 
 
 # Offline Semgrep ruleset embedded (written to temp file at runtime)
-OFFLINE_RULESET = r"""
-rules:
-  # Crypto: weak hashes
-  - id: py-weak-md5
-    message: Use of weak hash (md5)
-    severity: ERROR
-    languages: [python]
-    pattern: hashlib.md5(...)
-    metadata:
-      cwe: CWE-327
-      owasp: A02:2021
-
-  - id: py-weak-sha1
-    message: Use of weak hash (sha1)
-    severity: ERROR
-    languages: [python]
-    pattern: hashlib.sha1(...)
-    metadata:
-      cwe: CWE-327
-      owasp: A02:2021
-
-  # YAML / Deserialization
-  - id: py-unsafe-yaml-load
-    message: yaml.load without a safe loader
-    severity: ERROR
-    languages: [python]
-    patterns:
-      - pattern: yaml.load(...)
-      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader)
-      - pattern-not: yaml.load(..., Loader=SafeLoader)
-    metadata:
-      cwe: CWE-502
-      owasp: A08:2021
-
-  - id: py-unsafe-yaml-unsafe-load
-    message: yaml.unsafe_load used
-    severity: ERROR
-    languages: [python]
-    pattern: yaml.unsafe_load(...)
-    metadata:
-      cwe: CWE-502
-      owasp: A08:2021
-
-  - id: py-insecure-deserialization-pickle-loads
-    message: Insecure deserialization via pickle.loads
-    severity: ERROR
-    languages: [python]
-    pattern: pickle.loads(...)
-    metadata:
-      cwe: CWE-502
-      owasp: A08:2021
-
-  - id: py-insecure-deserialization-pickle-load
-    message: Insecure deserialization via pickle.load
-    severity: ERROR
-    languages: [python]
-    pattern: pickle.load(...)
-    metadata:
-      cwe: CWE-502
-      owasp: A08:2021
-
-  # Command Execution
-  - id: py-os-system
-    message: os.system() can lead to command injection
-    severity: ERROR
-    languages: [python]
-    pattern: os.system(...)
-    metadata:
-      cwe: CWE-78
-      owasp: A03:2021
-
-  - id: py-os-popen
-    message: os.popen*() can lead to command injection
-    severity: ERROR
-    languages: [python]
-    pattern-either:
-      - pattern: os.popen(...)
-      - pattern: os.popen2(...)
-      - pattern: os.popen3(...)
-      - pattern: os.popen4(...)
-    metadata:
-      cwe: CWE-78
-      owasp: A03:2021
-
-  - id: py-subprocess-shell-true
-    message: subprocess with shell=True (possible injection)
-    severity: ERROR
-    languages: [python]
-    patterns:
-      - pattern: subprocess.$F(..., shell=True, ...)
-      - metavariable-pattern:
-          metavariable: $F
-          pattern-either:
-            - pattern: run
-            - pattern: call
-            - pattern: Popen
-            - pattern: check_output
-    metadata:
-      cwe: CWE-78
-      owasp: A03:2021
-
-  - id: py-dangerous-eval
-    message: Dangerous use of eval()
-    severity: ERROR
-    languages: [python]
-    pattern: eval(...)
-    metadata:
-      cwe: CWE-95
-      owasp: A03:2021
-
-  - id: py-dangerous-exec
-    message: Dangerous use of exec()
-    severity: ERROR
-    languages: [python]
-    pattern: exec(...)
-    metadata:
-      cwe: CWE-95
-      owasp: A03:2021
-
-  # HTTP / TLS
-  - id: py-requests-disable-verify
-    message: TLS certificate verification disabled
-    severity: ERROR
-    languages: [python]
-    pattern: requests.$F(..., verify=False, ...)
-    metadata:
-      cwe: CWE-295
-      owasp: A02:2021
-
-  # Randomness / temp files
-  - id: py-random-for-secrets
-    message: random module is not cryptographically secure
-    severity: WARNING
-    languages: [python]
-    pattern: random.$F(...)
-    metadata:
-      cwe: CWE-338
-
-  - id: py-tempfile-mktemp
-    message: tempfile.mktemp() is insecure; use NamedTemporaryFile/mkstemp
-    severity: WARNING
-    languages: [python]
-    pattern: tempfile.mktemp(...)
-    metadata:
-      cwe: CWE-377
-
-  # Archives (handle direct and context-manager forms)
-  - id: py-tarfile-extractall
-    message: tarfile.extractall() can allow path traversal
-    severity: ERROR
-    languages: [python]
-    pattern-either:
-      - pattern: tarfile.extractall(...)
-      - pattern: tarfile.open(...).extractall(...)
-      - pattern: |
-          with tarfile.open(...) as $TF:
-            ...
-            $TF.extractall(...)
-    metadata:
-      cwe: CWE-22
-"""
+from trusted_rules import OFFLINE_RULESET
