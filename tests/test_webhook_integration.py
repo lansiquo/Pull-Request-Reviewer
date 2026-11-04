@@ -37,10 +37,6 @@ class _Resp:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    os.getenv("RUN_INTEGRATION") != "1",
-    reason="Set RUN_INTEGRATION=1 to run integration test.",
-)
 def test_pull_request_flow_integration(monkeypatch, tmp_path):
     # Required env for payload
     owner   = os.getenv("IT_OWNER") or "someone"
@@ -105,25 +101,8 @@ def test_pull_request_flow_integration(monkeypatch, tmp_path):
 
     client = TestClient(appmod.app)
 
-    # Optionally discover real SHAs (kept, but harmless if missing token)
-    expected_head = expected_base = None
-    api_token = os.getenv("GITHUB_TOKEN")
-    if api_token:
-        scheme = "token" if api_token.startswith(("ghp_", "github_pat_")) else "Bearer"
-        try:
-            r = requests.get(
-                f"https://api.github.com/repos/{owner}/{repo}/pulls/{prnum}",
-                headers={"Authorization": f"{scheme} {api_token}", "Accept": "application/vnd.github+json"},
-                timeout=30,
-            )
-            r.raise_for_status()
-            pj = r.json()
-            expected_head, expected_base = pj["head"]["sha"], pj["base"]["sha"]
-        except Exception:
-            expected_head = expected_base = None
-
-    head_sha = expected_head or ("0" * 40)
-    base_sha = expected_base or ("0" * 40)
+    head_sha = "a" * 40
+    base_sha = "b" * 40
 
     payload = {
         "action": "opened",
@@ -162,8 +141,3 @@ def test_pull_request_flow_integration(monkeypatch, tmp_path):
     assert j["pr"] == prnum
     assert HEX40.match(j["head"]), f"bad head sha: {j.get('head')}"
     assert HEX40.match(j["base"]), f"bad base sha: {j.get('base')}"
-
-    if expected_head:
-        assert j["head"] == expected_head
-    if expected_base:
-        assert j["base"] == expected_base

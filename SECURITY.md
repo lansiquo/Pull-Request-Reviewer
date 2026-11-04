@@ -1,11 +1,24 @@
-## Security Policy
+# Security model
 
-## Supported versions
-We release security fixes on the latest minor version.
+This is a local portfolio prototype. Do not expose it as a production multi-tenant scanner without worker isolation and durable job handling.
 
-## Reporting a vulnerability
-Please email security reports to <your-email-or-GitHub-issues-link>.
-Provide steps to reproduce and any PoC. We aim to acknowledge within 2 business days.
-MD
+## Trust boundaries
 
-### ARe you receiving the changes main?
+- **Webhook sender:** HMAC-SHA256 over the exact body is required, including ping events. No secret means no processing. Constant-time comparison supports rotation. Signed content is still validated before building GitHub API paths.
+- **PR author:** repository content is untrusted. Archives reject traversal, absolute paths, links, special files, duplicate entries, multiple roots, excessive members, and excessive expanded size. Downloads have a compressed-size cap. Repository code is never executed.
+- **Scanner:** only changed Python files are copied into a fresh scan directory. PR rules, ignore files, Git metadata and application credentials are excluded. Trusted rules are owned by this service. Engine errors, killed processes, malformed output, and reported parse errors cannot turn into a passing check.
+- **GitHub:** API credentials stay in the parent process. HTTPS certificate verification remains enabled. No test is allowed outbound HTTP. The offline demo does not mint tokens, create Checks, post comments, or fetch repositories.
+
+## Remaining risks
+
+Semgrep is a parser handling hostile source; a subprocess is not a security sandbox. Use a separate unprivileged worker with denied egress and strict resource limits before public use. Limits reduce archive abuse but do not eliminate decompression or parser denial of service. HTTP timeouts do not establish an end-to-end pipeline deadline. Background tasks are in-memory, have no persistent delivery deduplication, and may leave incomplete Checks after a crash. Signed replays can repeat scans. Logs and findings may contain source-derived text; restrict access and retention. Avoid loading secrets into development environments used for arbitrary tools.
+
+Rules cover selected Python patterns and can yield false positives or miss vulnerabilities. A green result means these rules found no issues in the scanned changed Python files; it is not a security certification.
+
+## Reporting
+
+Use the repository's private vulnerability reporting facility if enabled, or contact the repository owner through an established private channel. Do not post credentials or exploit-sensitive repository data in a public issue. No response SLA is currently promised.
+
+## Deployment preparation
+
+An opt-in durable mode now scopes jobs and ephemeral installation tokens to the configured repository, persists/reconciles Checks, and requires a rootless Docker scanner worker. See [deploy/README.md](deploy/README.md) for the controls and unverified deployment gates. The risks above describe the default local mode; the new mode is not declared production-ready. The original environment has known dependency advisories, and the tested current scanner package still has unresolved advisories. No host or credentials have been provisioned.
