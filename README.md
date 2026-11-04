@@ -1,4 +1,4 @@
-# PR Security Reviewer
+# Pull-Request-Reviewer
 
 A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline.
 
