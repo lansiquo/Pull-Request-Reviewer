@@ -2,6 +2,12 @@
 
 A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline.
 
+## Public interactive demo
+
+**[Try the interactive demo](https://dotrobin.dev/demos/pr.html)** — explore curated OWASP Top 10:2025 examples, compare proposed fixes, and read what each check can and cannot establish. No setup is required.
+
+This standalone, static portfolio walkthrough is separate from the main application. It does not run Python, Semgrep, behavioral tests, or GitHub requests, and it does not scan uploaded code. For real scans against bundled trusted fixtures, use the local demonstrations below.
+
 ## Five-minute local demonstration
 
 Use Python 3.11–3.13. No GitHub account, token, tunnel, or webhook secret is needed for the demo.
