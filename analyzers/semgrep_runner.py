@@ -239,7 +239,7 @@ def summarize_findings(findings: List[Dict[str, Any]]) -> Tuple[Dict[str, int], 
             counts[sev] += 1
 
     md = [
-        "### PR security reviewer — Semgrep summary",
+        "### sast-triage — Semgrep summary",
         "",
         f"- **Critical:** {counts['CRITICAL']}",
         f"- **High:** {counts['HIGH']}",

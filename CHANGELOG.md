@@ -5,6 +5,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Renamed the project to **sast-triage**, the SAST companion to sca-triage.
+- README now states what works today and the plan for the triage that isn't built yet.
 
 ## [v0.1.0] - 2025-09-21
 ### Added

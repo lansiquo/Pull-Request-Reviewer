@@ -1,6 +1,18 @@
-# PR Security Reviewer
+# sast-triage
 
-A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline.
+A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline. It is the SAST companion to [sca-triage](https://github.com/lansiquo/lansiquo-sca-remediation-lab), which ranks npm dependency vulnerabilities by whether your code actually loads them.
+
+## Status: in development
+
+**Works today:** signed webhooks, Semgrep scans of the changed Python files at the pull request's head commit using service-owned rules, GitHub Check Run annotations, fail-closed limits, and an offline demo and regression suite (`make check`).
+
+**Not built yet: the triage.** Every Semgrep finding in a changed file is reported. The tool can't yet tell findings the pull request introduced from ones that were already there, and it doesn't rank them. The name describes where it's going. The plan:
+
+1. **New vs pre-existing.** Use the pull request's diff to mark findings on added or changed lines as new. Findings elsewhere in a touched file are labelled pre-existing instead of being reported as if the pull request caused them.
+2. **P1/P2/P3 priority, like sca-triage.** Combine Semgrep severity (and the rule's confidence, where it has one) with whether the file is runtime or test code. Show the priority on each annotation and sort by it.
+3. **Gate only on what matters.** The Check Run fails only on new P1 findings.
+
+Until then, treat the findings as unranked and review each one yourself.
 
 ## Five-minute local demonstration
 
