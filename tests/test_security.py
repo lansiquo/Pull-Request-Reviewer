@@ -85,7 +85,7 @@ def test_duplicate_archive_path(tmp_path):
 def test_pipeline_failure_is_not_success(monkeypatch, tmp_path):
     (tmp_path / 'main.py').write_text('print(1)')
     monkeypatch.setattr(app, 'download_tarball', lambda *args: tmp_path)
-    monkeypatch.setattr(app, 'list_changed_files', lambda *args: ['main.py'])
+    monkeypatch.setattr(app, 'list_changed_files', lambda *args: {'main.py': None})
     def fail(**kwargs):
         raise RuntimeError('scan failed')
     monkeypatch.setattr(app, 'run_semgrep', fail)

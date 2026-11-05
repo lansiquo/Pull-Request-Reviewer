@@ -66,7 +66,7 @@ def test_change_during_scan_cancels_result(tmp_path, monkeypatch, last):
     states=iter([{'head':{'sha':'a'*40}}]*2+[last])
     monkeypatch.setattr(app,'_get_json',lambda *a,**k:next(states))
     monkeypatch.setattr(app,'download_tarball',lambda *a:tmp_path)
-    monkeypatch.setattr(app,'list_changed_files',lambda *a:['main.py'])
+    monkeypatch.setattr(app,'list_changed_files',lambda *a:{'main.py':None})
     scans=[]
     monkeypatch.setattr(app,'run_semgrep',lambda **k:scans.append(k) or [])
     completions=[];monkeypatch.setattr(app,'complete_check_run',lambda *a:completions.append(a))
@@ -76,7 +76,7 @@ def test_change_during_scan_cancels_result(tmp_path, monkeypatch, last):
 def test_missing_changed_python_file_is_failure(tmp_path,monkeypatch):
     monkeypatch.setattr(app,'MODE','local')
     monkeypatch.setattr(app,'download_tarball',lambda *a:tmp_path)
-    monkeypatch.setattr(app,'list_changed_files',lambda *a:['missing.py'])
+    monkeypatch.setattr(app,'list_changed_files',lambda *a:{'missing.py':None})
     monkeypatch.setattr(app,'run_semgrep',lambda **k:pytest.fail('Must not scan incomplete snapshot'))
     completed=[];monkeypatch.setattr(app,'complete_check_run',lambda *a:completed.append(a))
     pipeline();assert completed[0][3]=='failure'
@@ -84,7 +84,7 @@ def test_missing_changed_python_file_is_failure(tmp_path,monkeypatch):
 
 def test_removed_files_excluded_but_modified_files_preserved(monkeypatch):
     monkeypatch.setattr(app,'_get_json',lambda *a,**k:[{'filename':'deleted.py','status':'removed'},{'filename':'main.py','status':'modified'}])
-    assert app.list_changed_files('o','r',1,'fake',1)==['main.py']
+    assert app.list_changed_files('o','r',1,'fake',1)=={'main.py':None}
 
 
 def test_worker_applies_rate_limit_to_persistent_queue(tmp_path,monkeypatch):
