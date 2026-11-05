@@ -4,16 +4,21 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-11-05
 ### Added
 - **Triage.** Each finding is labelled **new** or **pre-existing** from the pull request's diff and ranked **P1/P2/P3** by severity and runtime vs test code, like sca-triage. A rule that rates its own confidence or likelihood LOW drops one level.
 - Annotation titles start with the priority and status, e.g. `[P1, new]`, and findings are sorted P1 first before the 200-annotation cap.
 - The demo simulates a pull request so both labels show.
+- **CI.** GitHub Actions runs `make check` on every pull request and every push to main, with both actions pinned to full commit SHAs.
 
 ### Changed
 - Renamed the project to **sast-triage**, the SAST companion to sca-triage.
 - The Check Run fails only on new P1 findings; it used to fail on any finding. Annotation colour follows the same rule, and the summary shows the gate result and a priority × new/pre-existing table instead of severity counts.
 - README now states what works today, including the triage, and what isn't built yet (deployment).
+- The deployment docs, the example environment and the README name the renamed repositories, `lansiquo/sast-triage` and `lansiquo/sca-triage`.
+
+### Removed
+- Tracked `.DS_Store` and `__pycache__` files, which `.gitignore` already covers.
 
 ## [v0.1.0] - 2025-09-21
 ### Added
