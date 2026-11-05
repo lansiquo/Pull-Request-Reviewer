@@ -2,7 +2,7 @@
 
 ## Current decision
 
-Wait for the mini PC. Keep the existing GitHub App and intended `lansiquo/PR_Reviewer` installation target. No paid hosting, GitHub Actions redesign, tunnel, new access grant, credential transfer, or public exposure has occurred.
+Wait for the mini PC. Keep the existing GitHub App and intended `lansiquo/sast-triage` installation target. No paid hosting, GitHub Actions redesign, tunnel, new access grant, credential transfer, or public exposure has occurred.
 
 ## Evaluated alternative: Opengrep v1.33.0
 
@@ -61,7 +61,7 @@ For the existing Semgrep comparison, use `PRSEC_SCANNER_COMMAND=semgrep` and `SE
 - Rootless Docker with functional cgroup v2 CPU/memory/PID controls. Do not expose its socket to the web service or scanner container. No Docker installation or host security change was made on the Mac.
 - Persistent SQLite state and backups, worker restart supervision, queue-age/error monitoring. No horizontal replicas or network filesystem for this design.
 - An approved, digest-pinned Linux scanner image with signature/provenance, complete SBOM and vulnerability review. For explicit Opengrep selection set `PRSEC_SCANNER_COMMAND=opengrep`; runtime image pulling is disabled.
-- Approval before transferring the existing App PEM or webhook secret to the VM. Reuse App ID 1776205 and installation 80788483. Runtime tokens request only Contents read, Pull requests read and Checks write for `lansiquo/PR_Reviewer`. No permission expansion is needed; the App credential itself retains its existing broader authority.
+- Approval before transferring the existing App PEM or webhook secret to the VM. Reuse App ID 1776205 and installation 80788483. Runtime tokens request only Contents read, Pull requests read and Checks write for `lansiquo/sast-triage`. No permission expansion is needed; the App credential itself retains its existing broader authority.
 - An independently approved ingress/TLS plan before changing the Smee webhook. No tunnel, firewall, routing or DNS changes are part of this preparation.
 
 ## Actual rootless boundary test — prepared, not run
