@@ -2,7 +2,9 @@
 import pytest
 
 import app
-from analyzers.triage import added_lines, changed_lines
+from analyzers import semgrep_runner as runner
+from analyzers.semgrep_runner import summarize_findings, to_github_annotations
+from analyzers.triage import added_lines, changed_lines, is_test_path, priority, triage
 
 # Two hunks: line 2 changed, line 3 added, then line 22 changed further down.
 PATCH = """@@ -1,4 +1,5 @@
@@ -45,3 +47,87 @@ def test_changed_file_list_keeps_each_files_changed_lines(monkeypatch):
         {'filename': 'gone.py', 'status': 'removed', 'patch': '@@ -1 +0,0 @@\n-x'},
     ])
     assert app.list_changed_files('o', 'r', 1, 'fake', 1) == {'a.py': {1}, 'big.py': None}
+
+
+def finding(path='app.py', line=1, end=None, severity='HIGH', **extra):
+    """A finding shaped like run_semgrep's output."""
+    return {'path': path, 'start_line': line, 'end_line': end or line, 'severity': severity,
+            'rule_id': 'py-rule', 'title': 'Risk', 'message': 'Risk', 'fix': None, 'cwe': None,
+            'owasp': None, 'confidence': None, 'likelihood': None, **extra}
+
+
+@pytest.mark.parametrize('path', ['tests/test_api.py', 'pkg/test/helpers.py', 'test_api.py',
+                                  'api_test.py', 'conftest.py', 'shop/tests.py'])
+def test_test_code_follows_pytest_and_django_naming(path):
+    assert is_test_path(path)
+
+
+@pytest.mark.parametrize('path', ['app.py', 'testing_utils.py', 'contest.py', 'latest.py', 'attestations/sign.py'])
+def test_everything_else_is_runtime_code(path):
+    assert not is_test_path(path)
+
+
+@pytest.mark.parametrize('severity,test_code,expected', [
+    ('CRITICAL', False, 'P1'), ('HIGH', False, 'P1'),
+    ('HIGH', True, 'P2'), ('MEDIUM', False, 'P2'),
+    ('MEDIUM', True, 'P3'), ('LOW', False, 'P3'), ('LOW', True, 'P3'),
+])
+def test_priority_mirrors_sca_triage(severity, test_code, expected):
+    assert priority(severity, test_code) == expected
+
+
+def test_low_rule_confidence_or_likelihood_drops_one_level():
+    assert priority('HIGH', False, confidence='LOW') == 'P2'
+    assert priority('HIGH', False, likelihood='LOW') == 'P2'
+    assert priority('MEDIUM', False, confidence='LOW') == 'P3'
+    assert priority('LOW', False, confidence='LOW') == 'P3'
+    assert priority('HIGH', False, confidence='HIGH', likelihood='MEDIUM') == 'P1'
+
+
+def test_findings_on_changed_lines_are_new_and_the_rest_pre_existing():
+    ranked = triage([
+        finding('app.py', 3),            # untouched line
+        finding('app.py', 9, end=11),    # multi-line call; only its last line changed
+        finding('big.py', 50),           # GitHub sent no diff for this file
+        finding('other.py', 1),          # missing from the changed list
+    ], {'app.py': {10, 11}, 'big.py': None})
+    assert [(f['path'], f['start_line'], f['new']) for f in ranked] == [
+        ('app.py', 9, True), ('big.py', 50, True), ('other.py', 1, True), ('app.py', 3, False)]
+
+
+def test_triage_sorts_p1_first_then_new_before_pre_existing():
+    ranked = triage([
+        finding('tests/test_x.py', 1),         # high in test code: P2
+        finding('app.py', 5, severity='LOW'),  # P3
+        finding('app.py', 2),                  # P1, untouched
+        finding('app.py', 8),                  # P1, changed
+    ], {'app.py': {8}, 'tests/test_x.py': {1}})
+    assert [(f['priority'], f['new'], f['start_line']) for f in ranked] == [
+        ('P1', True, 8), ('P1', False, 2), ('P2', True, 1), ('P3', False, 5)]
+
+
+def test_annotations_show_priority_and_status():
+    first, second = to_github_annotations(triage(
+        [finding('app.py', 8), finding('app.py', 2, confidence='LOW')], {'app.py': {8}}))
+    assert first['title'] == '[P1, new] Risk'
+    assert 'Priority: P1 (high severity, runtime code)' in first['raw_details']
+    assert 'Status: new' in first['raw_details']
+    assert second['title'] == '[P2, pre-existing] Risk'
+    assert 'Rule confidence: LOW' in second['raw_details']
+    assert 'did not change these lines' in second['raw_details']
+
+
+def test_summary_counts_by_priority_and_status():
+    counts, md = summarize_findings(triage(
+        [finding('app.py', 8), finding('app.py', 2), finding('tests/test_x.py', 1)], {'app.py': {8}}))
+    assert counts == {'P1': {'new': 1, 'pre-existing': 1}, 'P2': {'new': 1, 'pre-existing': 0},
+                      'P3': {'new': 0, 'pre-existing': 0}}
+    assert '| P1 | 1 | 1 |' in md
+
+
+def test_rule_confidence_and_likelihood_are_read_from_metadata():
+    result = {'path': 'app.py', 'check_id': 'r', 'start': {'line': 1}, 'end': {'line': 1},
+              'extra': {'severity': 'ERROR', 'message': 'Risk',
+                        'metadata': {'confidence': 'low', 'likelihood': ['not', 'a', 'rating']}}}
+    [normalized] = runner._normalize_results([result])
+    assert normalized['confidence'] == 'LOW' and normalized['likelihood'] is None
