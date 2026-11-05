@@ -188,7 +188,7 @@ def to_github_annotations(
     max_per_file: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Convert normalized findings → GitHub Checks annotations.
+    Convert triaged findings (see analyzers.triage) → GitHub Checks annotations.
     """
     out: List[Dict[str, Any]] = []
     per_file_count: Dict[str, int] = {}
@@ -203,7 +203,16 @@ def to_github_annotations(
 
         level = _severity_to_annotation_level(f["severity"])
         title = f.get("title") or f.get("rule_id") or "Semgrep finding"
-        meta: List[str] = []
+        label = "new" if f["new"] else "pre-existing"
+        code = "test" if f["test_code"] else "runtime"
+        meta: List[str] = [
+            f"Priority: {f['priority']} ({f['severity'].lower()} severity, {code} code)",
+            "Status: new (treat it as introduced by this pull request)" if f["new"]
+            else "Status: pre-existing (this pull request did not change these lines)",
+        ]
+        for rating in ("confidence", "likelihood"):
+            if f.get(rating):
+                meta.append(f"Rule {rating}: {f[rating]}")
         if f.get("rule_id"):
             meta.append(f"Rule: {f['rule_id']}")
         if f.get("cwe"):
@@ -218,7 +227,7 @@ def to_github_annotations(
             "start_line": int(f["start_line"]),
             "end_line": int(f["end_line"]),
             "annotation_level": level,       # failure | warning | notice
-            "title": title[:255],
+            "title": f"[{f['priority']}, {label}] {title}"[:255],
             "message": (f.get("message") or title)[:60000],
         }
         if meta:
@@ -228,23 +237,24 @@ def to_github_annotations(
     return out
 
 
-def summarize_findings(findings: List[Dict[str, Any]]) -> Tuple[Dict[str, int], str]:
+def summarize_findings(findings: List[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, int]], str]:
     """
-    Return (counts_by_severity, markdown_summary).
+    Return (counts by priority, then new/pre-existing; markdown summary).
     """
-    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    counts = {p: {"new": 0, "pre-existing": 0} for p in ("P1", "P2", "P3")}
     for f in findings:
-        sev = f.get("severity", "LOW")
-        if sev in counts:
-            counts[sev] += 1
+        counts[f["priority"]]["new" if f["new"] else "pre-existing"] += 1
 
     md = [
         "### sast-triage — Semgrep summary",
         "",
-        f"- **Critical:** {counts['CRITICAL']}",
-        f"- **High:** {counts['HIGH']}",
-        f"- **Medium:** {counts['MEDIUM']}",
-        f"- **Low:** {counts['LOW']}",
+        "| Priority | New | Pre-existing |",
+        "|---|---|---|",
+        *(f"| {p} | {c['new']} | {c['pre-existing']} |" for p, c in counts.items()),
+        "",
+        "P1: high or critical severity in runtime code. P2: high or critical in test code, "
+        "or medium in runtime code. P3: everything else. New: on lines this pull request "
+        "added or changed.",
     ]
     return counts, "\n".join(md)
 
@@ -492,7 +502,14 @@ def _normalize_results(results: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, 
             "fix": extra.get("fix") or meta.get("fix"),
             "cwe": cwe,
             "owasp": owasp,
+            "confidence": _rule_rating(meta.get("confidence")),
+            "likelihood": _rule_rating(meta.get("likelihood")),
         }
+
+
+def _rule_rating(value: Any) -> Optional[str]:
+    """Semgrep rules can rate their own confidence and likelihood: HIGH, MEDIUM or LOW."""
+    return value.strip().upper() if isinstance(value, str) and value.strip() else None
 
 
 def _rel_to_repo_root(path: str, repo_root: str) -> str:

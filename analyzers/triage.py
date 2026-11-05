@@ -6,10 +6,12 @@ function: no network, no files, no scanner calls.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional, Set
+from pathlib import PurePosixPath
+from typing import Any, Dict, List, Optional, Set
 
 # "@@ -12,4 +12,6 @@ optional context" -> the new file's hunk starts at line 12
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2}
 
 
 def added_lines(patch: Optional[str]) -> Optional[Set[int]]:
@@ -51,3 +53,47 @@ def changed_lines(entry: Dict[str, Any]) -> Optional[Set[int]]:
     if entry.get("status") == "renamed" and entry.get("changes") == 0:
         return set()
     return added_lines(entry.get("patch"))
+
+
+def is_test_path(path: str) -> bool:
+    """pytest and Django naming: a test/tests folder, test_*.py, *_test.py, tests.py or conftest.py."""
+    *folders, name = PurePosixPath(path).parts
+    return (any(folder in {"test", "tests"} for folder in folders)
+            or name.startswith("test_") or name.endswith("_test.py") or name in {"tests.py", "conftest.py"})
+
+
+# P1: high/critical in runtime code. Fix before merging.
+# P2: high/critical in test code, or medium in runtime code. Schedule it.
+# P3: everything else. Batch it with routine cleanup.
+# A rule that rates its own confidence or likelihood LOW drops one level.
+def priority(severity: str, test_code: bool, confidence: Optional[str] = None,
+             likelihood: Optional[str] = None) -> str:
+    high = severity in {"CRITICAL", "HIGH"}
+    if high and not test_code:
+        level = 1
+    elif high or (severity == "MEDIUM" and not test_code):
+        level = 2
+    else:
+        level = 3
+    if "LOW" in (confidence, likelihood):
+        level = min(level + 1, 3)
+    return f"P{level}"
+
+
+def triage(findings: List[Dict[str, Any]], changed: Dict[str, Optional[Set[int]]]) -> List[Dict[str, Any]]:
+    """Label each finding new or pre-existing, give it a priority, and sort P1 first.
+
+    `changed` comes from list_changed_files. A finding is new when any line it
+    covers was added or changed. A file whose changes are unknown (None), or
+    that is missing from `changed`, counts as entirely new.
+    """
+    ranked = []
+    for f in findings:
+        lines = changed.get(f["path"])
+        new = lines is None or any(n in lines for n in range(f["start_line"], f["end_line"] + 1))
+        test_code = is_test_path(f["path"])
+        ranked.append(dict(f, new=new, test_code=test_code,
+                           priority=priority(f["severity"], test_code, f.get("confidence"), f.get("likelihood"))))
+    # P1 first, new before pre-existing, then by file and line.
+    ranked.sort(key=lambda f: (PRIORITY_ORDER[f["priority"]], not f["new"], f["path"], f["start_line"]))
+    return ranked

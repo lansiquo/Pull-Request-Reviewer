@@ -34,7 +34,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 # --- analyzers (our runner) ---
 from analyzers.semgrep_runner import run_semgrep, to_github_annotations, summarize_findings
-from analyzers.triage import changed_lines
+from analyzers.triage import changed_lines, triage
 
 # PyJWT optional
 try:
@@ -439,11 +439,12 @@ def run_semgrep_pipeline(
                     summary = 'PR closed or changed during scanning; this result is stale.'
                     return
 
-            # 5) Summarize & annotate
+            # 5) Triage, summarize & annotate (sorted P1 first, so the cap never drops a P1 for a P3)
+            findings = triage(findings, changed)
             counts, summary_md = summarize_findings(findings)
             annotations = to_github_annotations(findings)[:MAX_ANNOTS]
 
-            if sum(counts.values()) == 0:
+            if not findings:
                 conclusion = "success"
                 summary = "No issues found"
             else:
