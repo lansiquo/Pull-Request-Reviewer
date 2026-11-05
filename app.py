@@ -34,7 +34,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 # --- analyzers (our runner) ---
 from analyzers.semgrep_runner import run_semgrep, to_github_annotations, summarize_findings
-from analyzers.triage import changed_lines, triage
+from analyzers.triage import changed_lines, gate, triage
 
 # PyJWT optional
 try:
@@ -444,15 +444,11 @@ def run_semgrep_pipeline(
             counts, summary_md = summarize_findings(findings)
             annotations = to_github_annotations(findings)[:MAX_ANNOTS]
 
-            if not findings:
-                conclusion = "success"
-                summary = "No issues found"
-            else:
-                conclusion = "failure"
-                summary = "Issues detected"
-
-            if summary_md:
-                summary = summary_md
+            # Only new P1 findings fail the check; everything else stays annotated.
+            conclusion = gate(findings)
+            new_p1 = counts["P1"]["new"]
+            title = f"{new_p1} new P1 finding" + ("" if new_p1 == 1 else "s")
+            summary = summary_md
 
     except GitHubRateLimitError:
         defer_completion = True

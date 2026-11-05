@@ -201,7 +201,7 @@ def to_github_annotations(
                 continue
             per_file_count[path] = c + 1
 
-        level = _severity_to_annotation_level(f["severity"])
+        level = _annotation_level(f)
         title = f.get("title") or f.get("rule_id") or "Semgrep finding"
         label = "new" if f["new"] else "pre-existing"
         code = "test" if f["test_code"] else "runtime"
@@ -245,8 +245,20 @@ def summarize_findings(findings: List[Dict[str, Any]]) -> Tuple[Dict[str, Dict[s
     for f in findings:
         counts[f["priority"]]["new" if f["new"] else "pre-existing"] += 1
 
+    new_p1 = [f for f in findings if f["new"] and f["priority"] == "P1"]
+    if new_p1:
+        plural = "" if len(new_p1) == 1 else "s"
+        gate_lines = [f"**Gate: FAIL** — {len(new_p1)} new P1 finding{plural}:",
+                      *(f"- `{f['path']}:{f['start_line']}` {f['rule_id']}" for f in new_p1[:10])]
+        if len(new_p1) > 10:
+            gate_lines.append(f"- and {len(new_p1) - 10} more")
+    else:
+        gate_lines = ["**Gate: PASS** — no new P1 findings. Anything else is annotated but doesn't fail the check."]
+
     md = [
         "### sast-triage — Semgrep summary",
+        "",
+        *gate_lines,
         "",
         "| Priority | New | Pre-existing |",
         "|---|---|---|",
@@ -543,11 +555,11 @@ def _severity_floor(raw: Optional[str]) -> Optional[str]:
     return _normalize_severity(val)
 
 
-def _severity_to_annotation_level(sev: str) -> str:
-    sev = (sev or "LOW").upper()
-    if sev in {"CRITICAL", "HIGH"}:
+def _annotation_level(f: Dict[str, Any]) -> str:
+    """Red only for what fails the check (new P1). New P2 warns; everything else is a notice."""
+    if f["new"] and f["priority"] == "P1":
         return "failure"
-    if sev == "MEDIUM":
+    if f["new"] and f["priority"] == "P2":
         return "warning"
     return "notice"
 
