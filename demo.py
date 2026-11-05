@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from app import OFFLINE_RULESET
 from analyzers.semgrep_runner import run_semgrep, summarize_findings, to_github_annotations
-from analyzers.triage import added_lines, triage
+from analyzers.triage import added_lines, gate, triage
 
 # A simulated pull request against vulnerable.py: it adds `import subprocess`
 # and unsafe_command(). The md5 call was already there, so it is pre-existing.
@@ -32,7 +32,8 @@ def main():
         for name, diff in (('vulnerable.py', PULL_REQUEST_DIFF), ('clean.py', None)):
             findings = run_semgrep([name], str(root), config=str(config))
             findings = triage(findings, {name: added_lines(diff)})
-            print(f'\n{name}: {"FAILURE" if findings else "SUCCESS"}')
+            conclusion = gate(findings)
+            print(f'\n{name}: {conclusion.upper()}')
             for f in findings:
                 label = 'new' if f['new'] else 'pre-existing'
                 print(f"  [{f['priority']}, {label}] {f['path']}:{f['start_line']}  {f['rule_id']}")
@@ -42,8 +43,9 @@ def main():
                 labels = {f['rule_id']: (f['priority'], f['new']) for f in findings}
                 assert labels['py-subprocess-shell-true'] == ('P1', True)
                 assert labels['py-weak-md5'] == ('P1', False)
+                assert conclusion == 'failure'
             else:
-                assert not findings
+                assert not findings and conclusion == 'success'
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ import pytest
 import app
 from analyzers import semgrep_runner as runner
 from analyzers.semgrep_runner import summarize_findings, to_github_annotations
-from analyzers.triage import added_lines, changed_lines, is_test_path, priority, triage
+from analyzers.triage import added_lines, changed_lines, gate, is_test_path, priority, triage
 
 # Two hunks: line 2 changed, line 3 added, then line 22 changed further down.
 PATCH = """@@ -1,4 +1,5 @@
@@ -131,3 +131,55 @@ def test_rule_confidence_and_likelihood_are_read_from_metadata():
                         'metadata': {'confidence': 'low', 'likelihood': ['not', 'a', 'rating']}}}
     [normalized] = runner._normalize_results([result])
     assert normalized['confidence'] == 'LOW' and normalized['likelihood'] is None
+
+
+def test_gate_fails_only_on_findings_that_are_new_and_p1():
+    p1_untouched, p2_new = triage([finding('app.py', 1), finding('app.py', 2, severity='MEDIUM')], {'app.py': {2}})
+    assert gate([]) == gate([p1_untouched, p2_new]) == 'success'
+    assert gate(triage([finding('app.py', 2)], {'app.py': {2}})) == 'failure'
+
+
+def test_summary_lists_at_most_ten_new_p1_findings():
+    _, md = summarize_findings(triage([finding('app.py', n) for n in range(1, 13)], {'app.py': None}))
+    assert md.count('`app.py:') == 10 and '- and 2 more' in md
+
+
+def run_pipeline(tmp_path, monkeypatch, findings, changed):
+    """Run the real pipeline with GitHub and Semgrep mocked; return what it reported."""
+    monkeypatch.setattr(app, 'MODE', 'local')
+    (tmp_path / 'tests').mkdir()
+    for name in ('app.py', 'tests/test_app.py'):
+        (tmp_path / name).write_text('print(1)\n')
+    monkeypatch.setattr(app, 'download_tarball', lambda *a: tmp_path)
+    monkeypatch.setattr(app, 'list_changed_files', lambda *a: changed)
+    monkeypatch.setattr(app, 'run_semgrep', lambda **k: findings)
+    completed = []
+    monkeypatch.setattr(app, 'complete_check_run', lambda *a: completed.append(a))
+    app.run_semgrep_pipeline('o', 'r', 'o', 'r', 1, 'a' * 40, 1, 'o', 'r', 99, 'fake')
+    conclusion, title, summary, annotations = completed[0][3:7]
+    return conclusion, title, summary, annotations
+
+
+def test_pre_existing_p1_alone_passes_the_check(tmp_path, monkeypatch):
+    conclusion, title, summary, annotations = run_pipeline(
+        tmp_path, monkeypatch, [finding('app.py', 1)], {'app.py': {5}})
+    assert conclusion == 'success' and title == '0 new P1 findings'
+    assert '**Gate: PASS**' in summary
+    assert annotations[0]['annotation_level'] == 'notice'
+
+
+def test_new_p2_alone_passes_the_check(tmp_path, monkeypatch):
+    conclusion, _, _, annotations = run_pipeline(
+        tmp_path, monkeypatch, [finding('tests/test_app.py', 1)], {'tests/test_app.py': {1}})
+    assert conclusion == 'success'
+    assert annotations[0]['annotation_level'] == 'warning'
+
+
+def test_new_p1_fails_the_check_and_comes_first(tmp_path, monkeypatch):
+    conclusion, title, summary, annotations = run_pipeline(tmp_path, monkeypatch, [
+        finding('app.py', 1), finding('app.py', 2, severity='MEDIUM'), finding('app.py', 3),
+    ], {'app.py': {3}})
+    assert conclusion == 'failure' and title == '1 new P1 finding'
+    assert '**Gate: FAIL** — 1 new P1 finding' in summary and '`app.py:3` py-rule' in summary
+    assert [a['annotation_level'] for a in annotations] == ['failure', 'notice', 'notice']
+    assert annotations[0]['start_line'] == 3

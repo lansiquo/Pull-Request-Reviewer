@@ -97,3 +97,8 @@ def triage(findings: List[Dict[str, Any]], changed: Dict[str, Optional[Set[int]]
     # P1 first, new before pre-existing, then by file and line.
     ranked.sort(key=lambda f: (PRIORITY_ORDER[f["priority"]], not f["new"], f["path"], f["start_line"]))
     return ranked
+
+
+def gate(findings: List[Dict[str, Any]]) -> str:
+    """The Check Run conclusion: it fails only when a finding is both new and P1."""
+    return "failure" if any(f["new"] and f["priority"] == "P1" for f in findings) else "success"
