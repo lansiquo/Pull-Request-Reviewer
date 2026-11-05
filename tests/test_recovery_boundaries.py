@@ -92,7 +92,7 @@ def test_head_changes_during_download_cancels_and_cleans_staging(monkeypatch):
         (root / 'main.py').write_text('print(1)')
         return root
     monkeypatch.setattr(app, 'download_tarball', download)
-    monkeypatch.setattr(app, 'list_changed_files', lambda *a: ['main.py'])
+    monkeypatch.setattr(app, 'list_changed_files', lambda *a: {'main.py': None})
     scans = []
     monkeypatch.setattr(app, 'run_semgrep', lambda **kw: scans.append(kw))
     completed = []

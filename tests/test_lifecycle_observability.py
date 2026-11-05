@@ -97,7 +97,7 @@ def test_base_changes_during_scan_cancel_result(tmp_path,monkeypatch):
     states=iter([current,current,{**current,'base':{'sha':'c'*40,'ref':'main'}}])
     monkeypatch.setattr(app,'_get_json',lambda *a,**k:next(states))
     monkeypatch.setattr(app,'download_tarball',lambda *a:tmp_path)
-    monkeypatch.setattr(app,'list_changed_files',lambda *a:['main.py'])
+    monkeypatch.setattr(app,'list_changed_files',lambda *a:{'main.py':None})
     monkeypatch.setattr(app,'run_semgrep',lambda **k:[])
     complete=[];monkeypatch.setattr(app,'complete_check_run',lambda *a:complete.append(a))
     app.run_semgrep_pipeline('lansiquo','PR_Reviewer','lansiquo','PR_Reviewer',1,'a'*40,80788483,

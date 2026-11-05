@@ -17,7 +17,7 @@ import tarfile
 import hashlib
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import certifi
 import requests
@@ -34,6 +34,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 # --- analyzers (our runner) ---
 from analyzers.semgrep_runner import run_semgrep, to_github_annotations, summarize_findings
+from analyzers.triage import changed_lines
 
 # PyJWT optional
 try:
@@ -285,8 +286,9 @@ def complete_check_run(owner: str, repo: str, check_id: int, conclusion: str, ti
         _patch_json(url, token, {"output": {"title": title, "summary": summary, "annotations": batch}}, install_id=install_id)
 
 # ---------- Repo utilities ----------
-def list_changed_files(owner: str, repo: str, pr: int, token: str, install_id: Optional[int]) -> List[str]:
-    files: List[str] = []
+def list_changed_files(owner: str, repo: str, pr: int, token: str, install_id: Optional[int]) -> Dict[str, Optional[Set[int]]]:
+    """Map each changed, non-deleted file to the lines the PR added or changed (None = unknown)."""
+    files: Dict[str, Optional[Set[int]]] = {}
     page = 1
     while page <= 30:
         js = _get_json(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr}/files", token, params={"per_page": 100, "page": page}, install_id=install_id)
@@ -294,7 +296,7 @@ def list_changed_files(owner: str, repo: str, pr: int, token: str, install_id: O
             raise RuntimeError('Invalid PR file list')
         if not js:
             break
-        files.extend(x['filename'] for x in js if x.get('status') != 'removed')
+        files.update((x['filename'], changed_lines(x)) for x in js if x.get('status') != 'removed')
         if len(js) < 100:
             break
         page += 1
