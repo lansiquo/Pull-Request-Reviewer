@@ -4,15 +4,29 @@ A GitHub App webhook service that reviews changed Python files with Semgrep and 
 
 ## Status: in development
 
-**Works today:** signed webhooks, Semgrep scans of the changed Python files at the pull request's head commit using service-owned rules, GitHub Check Run annotations, fail-closed limits, and an offline demo and regression suite (`make check`).
+**Works today:** signed webhooks, Semgrep scans of the changed Python files at the pull request's head commit using service-owned rules, fail-closed limits, an offline demo and regression suite (`make check`), and triage of every finding into GitHub Check Run annotations:
 
-**Not built yet: the triage.** Every Semgrep finding in a changed file is reported. The tool can't yet tell findings the pull request introduced from ones that were already there, and it doesn't rank them. The name describes where it's going. The plan:
-
-1. **New vs pre-existing.** Use the pull request's diff to mark findings on added or changed lines as new. Findings elsewhere in a touched file are labelled pre-existing instead of being reported as if the pull request caused them.
-2. **P1/P2/P3 priority, like sca-triage.** Combine Semgrep severity (and the rule's confidence, where it has one) with whether the file is runtime or test code. Show the priority on each annotation and sort by it.
+1. **New vs pre-existing.** The pull request's diff marks findings on added or changed lines as new. Findings elsewhere in a touched file are labelled pre-existing instead of being reported as if the pull request caused them.
+2. **P1/P2/P3 priority, like sca-triage.** Semgrep severity (and the rule's own confidence or likelihood, where it has one) is combined with whether the file is runtime or test code. Each annotation shows its priority, and they are sorted by it.
 3. **Gate only on what matters.** The Check Run fails only on new P1 findings.
 
-Until then, treat the findings as unranked and review each one yourself.
+**Not built yet: deployment.** The service runs locally. A durable deployment mode is prepared but has not been deployed; see [deploy/README.md](deploy/README.md).
+
+## How findings are triaged
+
+| | Meaning | On the Check Run |
+|---|---|---|
+| **P1** | High or critical severity in runtime code | Fails the check when new (red annotation) |
+| **P2** | High or critical in test code, or medium in runtime code | Warning when new |
+| **P3** | Everything else | Notice |
+
+- **New** means the finding covers at least one line the pull request added or changed, read from GitHub's diff for that file. **Pre-existing** findings are still annotated, as notices, but never fail the check.
+- If GitHub sends no diff for a file (it leaves out very large ones) or the diff can't be read, every finding in that file counts as new. A file that was only renamed counts as unchanged.
+- **Test code** follows pytest and Django naming: a `test` or `tests` folder, `test_*.py`, `*_test.py`, `tests.py` or `conftest.py`.
+- A rule whose metadata rates its own `confidence` or `likelihood` as `LOW` drops one level (P1 to P2, P2 to P3). The bundled rules don't set these yet.
+- **Limit:** pre-existing means the flagged lines weren't touched, not that the pull request is unrelated. A change elsewhere, such as a new import, can make an untouched line match, and that finding is still labelled pre-existing.
+
+The Check Run title counts the new P1 findings, and the summary shows the gate result and a priority × new/pre-existing table. The rules live in `analyzers/triage.py`.
 
 ## Five-minute local demonstration
 
@@ -25,15 +39,15 @@ python -m pip install -r requirements.txt
 make check
 ```
 
-`make test` runs the offline regression suite with HTTP blocked. `make demo` runs real Semgrep against two local source fixtures, never executes them, and prints the resulting GitHub annotation JSON. Expect **FAILURE** with two high-severity findings (MD5 and shell execution) for `vulnerable.py`, and **SUCCESS** with zero findings for `clean.py`. Scanner/configuration errors cause a nonzero exit.
+`make test` runs the offline regression suite with HTTP blocked. `make demo` runs real Semgrep against two local source fixtures, never executes them, and prints the triage and the resulting GitHub annotation JSON. For `vulnerable.py` it simulates a pull request that adds the shell call. Expect **FAILURE**, because shell execution is `[P1, new]`; the MD5 call that was already there is `[P1, pre-existing]` and doesn't fail the check. Expect **SUCCESS** with zero findings for `clean.py`. Scanner/configuration errors cause a nonzero exit.
 
 For an existing setup, run `make check` directly. Make uses `.venv/bin/python` when present, otherwise `python3`; `PY` can override this. The scanner searches beside that Python and then along PATH, skipping scripts whose shebang points to a missing interpreter (a common moved-virtualenv issue). An explicit `SEMGREP_BIN` is honored strictly and fails if unusable. No global tools or environment packages are changed.
 
 ## What to present
 
-1. Run `make demo` to show insecure code, rule IDs, CWE context, line numbers, and a clean comparison.
+1. Run `make demo` to show insecure code, rule IDs, CWE context, line numbers, priority and new/pre-existing labels, and a clean comparison.
 2. Run `make test` to show regression coverage for authentication, hostile archives, scan isolation, and failure reporting.
-3. Walk through the flow: signed webhook → validated immutable commit → bounded archive → selected Python source → trusted rules → Check Run annotations.
+3. Walk through the flow: signed webhook → validated immutable commit → bounded archive → selected Python source → trusted rules → triage against the pull request's diff → Check Run annotations.
 4. Explain the trust boundaries and deployment limitations in [SECURITY.md](SECURITY.md).
 
 ## Webhook service setup
@@ -44,7 +58,7 @@ For a separately approved GitHub demonstration, configure the App for pull reque
 
 Accepted PR actions: opened, reopened, synchronize, edited, ready_for_review. HMAC-SHA256 is mandatory; `GITHUB_WEBHOOK_SECRETS` supports comma-separated rotation values. Missing secrets return 503, bad signatures 401, malformed payloads 400, oversized bodies 413, busy scanners 503, and GitHub setup failures 502. Accepted requests return 200; scan results arrive through Check Runs.
 
-Scans use service-owned embedded Python rules only. They inspect whole changed files at PR HEAD, not just added lines. PR-provided rules and ignore files are not used. Deleted-only or unsupported-language changes receive a neutral result. Scanner errors and partial scan errors produce failure, never success. Findings are capped at 200 annotations and uploaded in batches of 50.
+Scans use service-owned embedded Python rules only. They inspect whole changed files at PR HEAD, not just added lines; findings on lines the pull request didn't change are labelled pre-existing, not dropped. PR-provided rules and ignore files are not used. Deleted-only or unsupported-language changes receive a neutral result. Scanner errors and partial scan errors produce failure, never success. Findings are sorted P1 first, capped at 200 annotations and uploaded in batches of 50.
 
 ## Prepared deployment mode
 

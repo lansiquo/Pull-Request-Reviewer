@@ -5,9 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **Triage.** Each finding is labelled **new** or **pre-existing** from the pull request's diff and ranked **P1/P2/P3** by severity and runtime vs test code, like sca-triage. A rule that rates its own confidence or likelihood LOW drops one level.
+- Annotation titles start with the priority and status, e.g. `[P1, new]`, and findings are sorted P1 first before the 200-annotation cap.
+- The demo simulates a pull request so both labels show.
+
 ### Changed
 - Renamed the project to **sast-triage**, the SAST companion to sca-triage.
-- README now states what works today and the plan for the triage that isn't built yet.
+- The Check Run fails only on new P1 findings; it used to fail on any finding. Annotation colour follows the same rule, and the summary shows the gate result and a priority × new/pre-existing table instead of severity counts.
+- README now states what works today, including the triage, and what isn't built yet (deployment).
 
 ## [v0.1.0] - 2025-09-21
 ### Added
