@@ -13,7 +13,9 @@ This is a local portfolio prototype. Do not expose it as a production multi-tena
 
 Semgrep is a parser handling hostile source; a subprocess is not a security sandbox. Use a separate unprivileged worker with denied egress and strict resource limits before public use. Limits reduce archive abuse but do not eliminate decompression or parser denial of service. HTTP timeouts do not establish an end-to-end pipeline deadline. Background tasks are in-memory, have no persistent delivery deduplication, and may leave incomplete Checks after a crash. Signed replays can repeat scans. Logs and findings may contain source-derived text; restrict access and retention. Avoid loading secrets into development environments used for arbitrary tools.
 
-Rules cover selected Python patterns and can yield false positives or miss vulnerabilities. A green result means these rules found no issues in the scanned changed Python files; it is not a security certification.
+Rules cover selected Python patterns and can yield false positives or miss vulnerabilities. A green result means these rules found no new P1 findings in the scanned changed Python files; other findings are still annotated. It is not a security certification.
+
+Triage labels come from GitHub's diff for the pull request. When a file's diff is missing or unreadable, every finding in it counts as new, so a bad diff can only over-report. "Pre-existing" only means the flagged lines were not changed: a pull request can make an untouched line match (for example by adding an import), and that finding is labelled pre-existing and does not fail the check, so reviewers should still read pre-existing notices in touched files. In the default local mode the diff is fetched after the snapshot, so a push in between can mislabel findings on the superseded commit; durable mode re-checks the head commit and cancels such scans.
 
 ## Reporting
 
