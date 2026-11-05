@@ -149,4 +149,4 @@ rules/                       early starter rules from 2025, not used by the serv
 .github/branch-protection/   historical examples, not applied
 ```
 
-Write-up: [dotrobin.dev/pr-reviewer](https://dotrobin.dev/pr-reviewer.html)
+Write-up: [dotrobin.dev/sast-triage](https://dotrobin.dev/sast-triage.html)
