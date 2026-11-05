@@ -1,16 +1,52 @@
 # sast-triage
 
-A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline. It is the SAST companion to [sca-triage](https://github.com/lansiquo/sca-triage), which ranks npm dependency vulnerabilities by whether your code actually loads them.
+A GitHub App service that reviews pull requests with Semgrep, **labels each finding new or pre-existing from the pull request's diff, ranks it P1–P3, and fails the check only on new P1 findings**. A pull request is blocked by what it introduced, not by what was already there.
 
-## Status: in development
+**Status: v1.0, works locally, not deployed.** Its SCA companion, [sca-triage](https://github.com/lansiquo/sca-triage), ranks npm dependency vulnerabilities by whether your code loads them, using the same P1–P3 scale.
 
-**Works today:** signed webhooks, Semgrep scans of the changed Python files at the pull request's head commit using service-owned rules, fail-closed limits, an offline demo and regression suite (`make check`), and triage of every finding into GitHub Check Run annotations:
+## Why
 
-1. **New vs pre-existing.** The pull request's diff marks findings on added or changed lines as new. Findings elsewhere in a touched file are labelled pre-existing instead of being reported as if the pull request caused them.
-2. **P1/P2/P3 priority, like sca-triage.** Semgrep severity (and the rule's own confidence or likelihood, where it has one) is combined with whether the file is runtime or test code. Each annotation shows its priority, and they are sorted by it.
-3. **Gate only on what matters.** The Check Run fails only on new P1 findings.
+Running Semgrep as a step in a repository's own CI has two problems on pull requests. It reports every finding in the code it scans, including ones the pull request didn't introduce, and the pull request controls its own scan. `sast-triage` runs outside the repository and triages each finding:
 
-**Not built yet: deployment.** The service runs locally. A durable deployment mode is prepared but has not been deployed; see [deploy/README.md](deploy/README.md).
+| | A Semgrep step in the repo's CI | `sast-triage` |
+|---|---|---|
+| Scans the pull request's code with Semgrep | ✅ | ✅ changed Python files, at the exact head commit |
+| Tells new findings from pre-existing ones | partly: `--baseline-commit` hides pre-existing findings | ✅ labels both, hides neither |
+| Ranks by where the code runs | ❌ severity only | ✅ P1–P3: severity × runtime vs test code |
+| Fails only on what matters | ❌ `--error` fails on any finding | ✅ only new P1 findings |
+| A pull request can't weaken its own scan | ❌ the PR can edit the workflow, ignore files or add `nosemgrep` comments | ✅ service-owned rules; `nosemgrep` is ignored |
+
+## Quick start
+
+Requires Python 3.11–3.13. No GitHub account, token, tunnel, or webhook secret is needed.
+
+```bash
+git clone https://github.com/lansiquo/sast-triage.git
+cd sast-triage
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+make check        # offline tests, then the demo
+```
+
+`make test` runs the offline regression suite with outbound HTTP blocked. `make demo` runs real Semgrep on two local fixtures, never executes them, and prints the triage and the resulting GitHub annotation JSON. Scanner or configuration errors exit nonzero.
+
+Make uses `.venv/bin/python` when it exists, otherwise `python3` (override with `PY`). Set `SEMGREP_BIN` to use a specific Semgrep; it fails if that one is unusable.
+
+## What the demo shows (real output)
+
+```text
+vulnerable.py: FAILURE
+  [P1, new] vulnerable.py:11  py-subprocess-shell-true
+  [P1, pre-existing] vulnerable.py:7  py-weak-md5
+**Gate: FAIL** — 1 new P1 finding:
+- `vulnerable.py:11` py-subprocess-shell-true
+
+clean.py: SUCCESS
+**Gate: PASS** — no new P1 findings. Anything else is annotated but doesn't fail the check.
+```
+
+The demo simulates a pull request that adds a `shell=True` call to a file that already had an MD5 call. Both are high severity in runtime code, so both are P1, but only the new one fails the check. The MD5 call is still annotated, as a notice.
 
 ## How findings are triaged
 
@@ -24,58 +60,93 @@ A GitHub App webhook service that reviews changed Python files with Semgrep and 
 - If GitHub sends no diff for a file (it leaves out very large ones) or the diff can't be read, every finding in that file counts as new. A file that was only renamed counts as unchanged.
 - **Test code** follows pytest and Django naming: a `test` or `tests` folder, `test_*.py`, `*_test.py`, `tests.py` or `conftest.py`.
 - A rule whose metadata rates its own `confidence` or `likelihood` as `LOW` drops one level (P1 to P2, P2 to P3). The bundled rules don't set these yet.
-- **Limit:** pre-existing means the flagged lines weren't touched, not that the pull request is unrelated. A change elsewhere, such as a new import, can make an untouched line match, and that finding is still labelled pre-existing.
 
-The Check Run title counts the new P1 findings, and the summary shows the gate result and a priority × new/pre-existing table. The rules live in `analyzers/triage.py`.
+The Check Run title counts the new P1 findings, and the summary shows the gate result and a priority × new/pre-existing table.
 
-## Five-minute local demonstration
+## Run it as a GitHub App
 
-Use Python 3.11–3.13. No GitHub account, token, tunnel, or webhook secret is needed for the demo.
+1. Configure a GitHub App for **pull request** events with Contents read, Pull requests read, and Checks write permissions.
+2. Copy `.env.example` to `.env` and set a strong webhook secret, the App ID and the path to the App's private key. Keep the key outside the repository.
+3. Run `make serve`. `/health` reports liveness and `/docs` shows the API schema. The listener binds to loopback.
+4. Exposing it through Smee or another tunnel, and installing the App, are separate steps you take yourself. A real webhook **creates real Check Runs**, so use a test repository. This repository never creates grants, installs Apps, changes branch protection or publishes itself.
 
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-make check
+How it behaves:
+
+- Accepted pull request actions: opened, reopened, synchronize, edited, ready_for_review.
+- HMAC-SHA256 signatures are mandatory. `GITHUB_WEBHOOK_SECRETS` takes comma-separated values for rotation.
+- Responses: 503 when no secret is configured or the scanner is busy, 401 for a bad signature, 400 for a malformed payload, 413 for a body over 1 MiB, 502 for a GitHub setup failure, and 200 when accepted. Results arrive as Check Runs.
+- Only service-owned rules run. Rules and ignore files from the pull request are never used. Whole changed files are scanned at the pull request's head commit.
+- Deleted-only or non-Python changes get a neutral result. Scanner errors and partial results fail the check; they never pass it.
+- Findings are sorted P1 first, capped at 200 annotations, and uploaded in batches of 50.
+
+A durable deployment mode (SQLite job queue, separate worker, rootless Docker sandbox) is prepared but not deployed. See [deploy/README.md](deploy/README.md).
+
+## Why I built it this way
+
+I wanted a pull request check that answers one question: did this change introduce something serious? Three decisions follow from that.
+
+- **The pull request can't change its own scan.** The rules belong to the service, not the repository, and `nosemgrep` comments are ignored, so a pull request can't edit, skip or suppress the check that reviews it.
+- **Labels can over-report, never hide.** If a diff is missing or unreadable, every finding in that file counts as new, and pre-existing findings are still shown, as notices.
+- **Fail closed.** Scanner errors, partial results and skipped files fail the check. Only a complete scan can pass.
+
+Next is deploying it behind the rootless Docker sandbox designed in `deploy/`.
+
+## Limits
+
+- **Small Python ruleset.** 15 service-owned rules. It is not a full security audit or proof that code is safe, and pattern matches can need human review. No dependency, secret, JavaScript or infrastructure scanning.
+- **Pre-existing means untouched, not unrelated.** A change elsewhere, such as a new import, can make an untouched line match, and that finding is still labelled pre-existing.
+- **Size limits fail closed.** Up to a 1 MiB webhook body, a 25 MiB compressed archive, 100 MiB extracted, 10,000 archive members and 3,000 changed files. Larger pull requests fail closed.
+- **Local mode is not a deployment.** It runs two concurrent in-memory jobs. The durable mode's guarantees and limits are in the [deployment guide](deploy/README.md).
+- **No end-to-end deadline.** Semgrep has a timeout, and HTTP timeouts are per request, not a total deadline.
+- **Not an OS sandbox when run locally.** Credentials are removed from the scanner's environment and only the selected files are staged, but use a separate unprivileged worker with CPU, memory and disk limits and no network egress before scanning hostile public repositories.
+- **Known dependency findings.** The original local demo environment has them. Use the audited service lock in `deploy/` for deployments.
+
+See [SECURITY.md](SECURITY.md) for the trust boundaries and remaining risks.
+
+## Architecture
+
+```text
+GitHub pull request webhook
+        |
+        v
+app.py ---------------------- verify the HMAC signature, validate the payload
+        |
+        +---> GitHub API ----- changed files and their diffs, head-commit archive
+        |
+        v
+analyzers/semgrep_runner.py - stage the changed .py files, run Semgrep with
+        |                     the service-owned rules in trusted_rules.py
+        v
+analyzers/triage.py --------- new vs pre-existing, P1 / P2 / P3, pass or fail
+        |
+        v
+GitHub Check Run (annotations, summary, conclusion)
 ```
 
-`make test` runs the offline regression suite with HTTP blocked. `make demo` runs real Semgrep against two local source fixtures, never executes them, and prints the triage and the resulting GitHub annotation JSON. For `vulnerable.py` it simulates a pull request that adds the shell call. Expect **FAILURE**, because shell execution is `[P1, new]`; the MD5 call that was already there is `[P1, pre-existing]` and doesn't fail the check. Expect **SUCCESS** with zero findings for `clean.py`. Scanner/configuration errors cause a nonzero exit.
-
-For an existing setup, run `make check` directly. Make uses `.venv/bin/python` when present, otherwise `python3`; `PY` can override this. The scanner searches beside that Python and then along PATH, skipping scripts whose shebang points to a missing interpreter (a common moved-virtualenv issue). An explicit `SEMGREP_BIN` is honored strictly and fails if unusable. No global tools or environment packages are changed.
-
-## What to present
-
-1. Run `make demo` to show insecure code, rule IDs, CWE context, line numbers, priority and new/pre-existing labels, and a clean comparison.
-2. Run `make test` to show regression coverage for authentication, hostile archives, scan isolation, and failure reporting.
-3. Walk through the flow: signed webhook → validated immutable commit → bounded archive → selected Python source → trusted rules → triage against the pull request's diff → Check Run annotations.
-4. Explain the trust boundaries and deployment limitations in [SECURITY.md](SECURITY.md).
-
-## Webhook service setup
-
-Copy `.env.example` to `.env` and configure a strong webhook secret plus GitHub App ID and PEM path. Keep the PEM outside the repository. Run `make serve`; `/health` reports liveness and `/docs` exposes the API schema. The listener binds to loopback by default.
-
-For a separately approved GitHub demonstration, configure the App for pull request events with Contents read, Pull requests read, and Checks write permissions. Exposing the server via Smee or another tunnel and installing the App are separate operator actions. This repository does not create grants, install Apps, change branch protections, or publish itself. A real authenticated PR webhook **does create/update remote Check Runs**, so use a designated test repository. Receipt comments are no longer posted.
-
-Accepted PR actions: opened, reopened, synchronize, edited, ready_for_review. HMAC-SHA256 is mandatory; `GITHUB_WEBHOOK_SECRETS` supports comma-separated rotation values. Missing secrets return 503, bad signatures 401, malformed payloads 400, oversized bodies 413, busy scanners 503, and GitHub setup failures 502. Accepted requests return 200; scan results arrive through Check Runs.
-
-Scans use service-owned embedded Python rules only. They inspect whole changed files at PR HEAD, not just added lines; findings on lines the pull request didn't change are labelled pre-existing, not dropped. PR-provided rules and ignore files are not used. Deleted-only or unsupported-language changes receive a neutral result. Scanner errors and partial scan errors produce failure, never success. Findings are sorted P1 first, capped at 200 annotations and uploaded in batches of 50.
-
-## Prepared deployment mode
-
-See [deploy/README.md](deploy/README.md) for the verified existing GitHub App, repository scope, durable queue, isolated scanner design, dependency findings, and remaining approval/testing gates. This mode has not been deployed. The default local demo remains available.
-
-## Scope and limits
-
-- Small Python-focused ruleset; not a comprehensive security audit or proof that code is safe.
-- No dependency, secret, JavaScript, or infrastructure scanning. Pattern matches can require human triage.
-- Up to 1 MiB webhook body, 25 MiB compressed archive, 100 MiB extracted data, 10,000 members, and 3,000 changed-file entries. Large PRs fail closed.
-- Default local mode has two concurrent in-memory jobs and is not a deployment service. The prepared durable mode uses SQLite and a separately supervised worker; its exact guarantees and limits are documented in the deployment guide.
-- Semgrep has a subprocess timeout, but the service has no hard end-to-end job deadline. HTTP timeouts are per request, not total download deadlines.
-- Scanner credentials are removed from its environment and only selected source files are staged. This is **not an OS sandbox**; use a separate unprivileged worker with CPU/memory/disk limits and denied network egress before scanning public hostile repositories at scale.
-- The original local demo environment is preserved and has known dependency findings. Use the separately audited service lock for deployment preparation. No live GitHub or Docker deployment is claimed by the offline demo.
-
-Historical branch-protection examples under `.github/branch-protection/` are retained as reference, not automatically applied. See [SECURITY.md](SECURITY.md) for threat boundaries.
+- `app.py` receives and verifies webhooks, downloads the pull request's head commit, lists the changed files with their diffs, runs the pipeline and completes the Check Run.
+- `analyzers/semgrep_runner.py` stages only the changed Python files, runs Semgrep without the service's credentials, rejects incomplete output, and builds the annotations and summary.
+- `analyzers/triage.py` reads the diffs, labels each finding new or pre-existing, assigns P1/P2/P3 and decides pass or fail.
+- `trusted_rules.py` holds the 15 service-owned Semgrep rules.
+- `worker.py`, `job_store.py` and `job_payload.py` are the durable mode: a SQLite job queue and a separate scanning worker. `manage_jobs.py` and `queue_maintenance.py` are operator tools for it.
 
 ## Local interactive showcase
 
-Run `.venv/bin/python demo_web.py` and open http://127.0.0.1:8765. Select the proposed fixture, inspect live findings, compare the remediation, and rescan. Stop with Ctrl+C. PR presentation is simulated; scans are real and limited to bundled trusted fixtures. See [demo instructions and limitations](deploy/local-showcase.md).
+Run `.venv/bin/python demo_web.py` and open http://127.0.0.1:8765 to step through ten OWASP Top 10:2025 examples. Four run real Semgrep scans with a small demo ruleset (`demo_rules.py`), and six run behavioral tests on authored fixtures in isolated child processes. The pull request view is simulated, and only bundled fixtures are accepted. Stop it with Ctrl+C. See [the showcase guide](deploy/local-showcase.md).
+
+## Layout
+
+```text
+app.py                       webhook service and scan pipeline
+analyzers/                   Semgrep runner and triage
+trusted_rules.py             the 15 service-owned rules
+worker.py, job_store.py      durable mode (SQLite queue, separate worker)
+demo.py                      offline demo (make demo)
+demo_web.py, demo/           local interactive showcase
+tests/                       offline regression suite (make test)
+deploy/                      prepared deployment design and evidence (not deployed)
+rules/                       early starter rules from 2025, not used by the service
+.github/workflows/ci.yml     runs make check on every pull request and push to main
+.github/branch-protection/   historical examples, not applied
+```
+
+Write-up: [dotrobin.dev/pr-reviewer](https://dotrobin.dev/pr-reviewer.html)
