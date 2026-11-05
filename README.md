@@ -1,6 +1,6 @@
 # sast-triage
 
-A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline. It is the SAST companion to [sca-triage](https://github.com/lansiquo/lansiquo-sca-remediation-lab), which ranks npm dependency vulnerabilities by whether your code actually loads them.
+A GitHub App webhook service that reviews changed Python files with Semgrep and reports findings as GitHub Check Run annotations. Designed as a local portfolio demonstration of a security automation pipeline. It is the SAST companion to [sca-triage](https://github.com/lansiquo/sca-triage), which ranks npm dependency vulnerabilities by whether your code actually loads them.
 
 ## Status: in development
 

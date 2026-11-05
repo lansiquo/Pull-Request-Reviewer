@@ -4,7 +4,7 @@
 
 - Existing App: **Security PR Reviewer**, ID `1776205`, owned by `lansiquo`.
 - Existing installation: `80788483`; it currently covers all the account's repositories with broad permissions.
-- Intended service target: **`lansiquo/PR_Reviewer`**, public, default branch `main`.
+- Intended service target: **`lansiquo/sast-triage`**, public, default branch `main`.
 - Existing webhook destination: HTTPS on `smee.io`. The channel URL is deliberately omitted.
 - GitHub reports no deployments and no Actions workflows for this repository.
 
@@ -25,7 +25,7 @@ SQLite provides persistent semantic deduplication by installation/repository/PR/
 1. **Host:** wait for the mini PC and provision the dedicated Linux VM only after approval. No paid provider, tunnel or network expansion is authorized.
 2. **Credentials:** approve placing the existing App private key and webhook secret in the named host's secret store. No upload has occurred.
 3. **Scanner:** select and audit an immutable scanner image, then run container integration tests on rootless Docker. The local Docker daemon is unavailable. The current tested Semgrep Python distribution has unresolved dependency advisories; it is not approved for deployment.
-4. **Cutover:** once the backend passes the gates, configure the existing App webhook to the approved HTTPS `/webhook` endpoint, verify TLS and signatures, and test a labelled PR in `lansiquo/PR_Reviewer`. This may produce Checks on that test PR; it must not merge it or alter unrelated work.
+4. **Cutover:** once the backend passes the gates, configure the existing App webhook to the approved HTTPS `/webhook` endpoint, verify TLS and signatures, and test a labelled PR in `lansiquo/sast-triage`. This may produce Checks on that test PR; it must not merge it or alter unrelated work.
 
 The existing App's all-repository installation and broad permissions should be reviewed with the owner. Changing them is a separate approval decision, not part of the prepared code changes.
 
