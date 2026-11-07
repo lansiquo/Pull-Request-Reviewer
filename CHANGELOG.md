@@ -4,6 +4,10 @@ All notable changes to this project will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Changed
+- The demo now simulates one pull request across a runtime file and a test file, with five findings that cover every triage outcome: P1 new (fails), P1 pre-existing, P2 from medium severity in runtime code, P2 from high severity in test code, and P3 pre-existing.
+
 ## [1.0.0] - 2026-11-05
 ### Added
 - **Triage.** Each finding is labelled **new** or **pre-existing** from the pull request's diff and ranked **P1/P2/P3** by severity and runtime vs test code, like sca-triage. A rule that rates its own confidence or likelihood LOW drops one level.

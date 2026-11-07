@@ -29,24 +29,37 @@ python -m pip install -r requirements.txt
 make check        # offline tests, then the demo
 ```
 
-`make test` runs the offline regression suite with outbound HTTP blocked. `make demo` runs real Semgrep on two local fixtures, never executes them, and prints the triage and the resulting GitHub annotation JSON. Scanner or configuration errors exit nonzero.
+`make test` runs the offline regression suite with outbound HTTP blocked. `make demo` runs real Semgrep on three local fixtures, never executes them, and prints the triage and the resulting GitHub annotation JSON. Scanner or configuration errors exit nonzero.
 
 Make uses `.venv/bin/python` when it exists, otherwise `python3` (override with `PY`). Set `SEMGREP_BIN` to use a specific Semgrep; it fails if that one is unusable.
 
 ## What the demo shows (real output)
 
 ```text
-vulnerable.py: FAILURE
-  [P1, new] vulnerable.py:11  py-subprocess-shell-true
-  [P1, pre-existing] vulnerable.py:7  py-weak-md5
+Pull request (vulnerable.py, test_reports.py): FAILURE
+  [P1, new] vulnerable.py:12  py-subprocess-shell-true
+  [P1, pre-existing] vulnerable.py:8  py-weak-md5
+  [P2, new] test_reports.py:7  py-insecure-deserialization-pickle-loads
+  [P2, new] vulnerable.py:16  py-random-for-secrets
+  [P3, pre-existing] test_reports.py:11  py-tempfile-mktemp
 **Gate: FAIL** — 1 new P1 finding:
-- `vulnerable.py:11` py-subprocess-shell-true
+- `vulnerable.py:12` py-subprocess-shell-true
 
 clean.py: SUCCESS
 **Gate: PASS** — no new P1 findings. Anything else is annotated but doesn't fail the check.
 ```
 
-The demo simulates a pull request that adds a `shell=True` call to a file that already had an MD5 call. Both are high severity in runtime code, so both are P1, but only the new one fails the check. The MD5 call is still annotated, as a notice.
+The demo simulates one pull request that changes a runtime file and a test file. It produces five findings, and each lands somewhere different on the scale:
+
+| Finding | Why | Result |
+|---|---|---|
+| `shell=True` | High severity, runtime code, added by this PR | **P1, new**: fails the check |
+| MD5 | High severity, runtime code, already there | P1, pre-existing: notice |
+| `pickle.loads` | High severity, but in test code | P2, new: warning |
+| `random` for a reset token | Medium severity, runtime code | P2, new: warning |
+| `tempfile.mktemp` | Medium severity, test code, already there | P3, pre-existing: notice |
+
+Five findings, one blocker. A plain Semgrep step with `--error` would fail this pull request and treat all five the same.
 
 ## How findings are triaged
 
