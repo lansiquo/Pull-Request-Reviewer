@@ -24,16 +24,16 @@ Migration sequence on the approved host, with actual paths substituted:
 2. Inspect and create a consistent snapshot. The backup API includes committed WAL data; ordinary copying of only the main file is unsafe.
 
 ```sh
-.venv-service/bin/python queue_maintenance.py inspect /srv/pr-reviewer/state/jobs.sqlite3
-.venv-service/bin/python queue_maintenance.py backup /srv/pr-reviewer/state/jobs.sqlite3 /approved-backup-location/before-upgrade.sqlite3
+.venv-service/bin/python queue_maintenance.py inspect /srv/sast-triage/state/jobs.sqlite3
+.venv-service/bin/python queue_maintenance.py backup /srv/sast-triage/state/jobs.sqlite3 /approved-backup-location/before-upgrade.sqlite3
 .venv-service/bin/python queue_maintenance.py inspect /approved-backup-location/before-upgrade.sqlite3
 ```
 
 3. Run the new code's explicit quarantine only with services stopped and the backup verified:
 
 ```sh
-.venv-service/bin/python manage_jobs.py --db /srv/pr-reviewer/state/jobs.sqlite3 --quarantine-legacy
-.venv-service/bin/python queue_maintenance.py inspect /srv/pr-reviewer/state/jobs.sqlite3
+.venv-service/bin/python manage_jobs.py --db /srv/sast-triage/state/jobs.sqlite3 --quarantine-legacy
+.venv-service/bin/python queue_maintenance.py inspect /srv/sast-triage/state/jobs.sqlite3
 ```
 
 4. Run both role-specific configuration checks below. Review failed jobs, start the worker, and verify `/ready` and local queue state before reopening intake. Arrange replay of missed/legacy events through the approved GitHub process.
